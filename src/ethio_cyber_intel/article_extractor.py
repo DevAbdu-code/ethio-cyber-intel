@@ -49,7 +49,7 @@ class ArticleExtractor:
             if response.status_code == 404:
                 parser.parse([])
                 self._robots[origin] = parser
-            elif response.ok:
+            elif 200 <= response.status_code < 300:
                 parser.parse(response.text.splitlines())
                 self._robots[origin] = parser
             else:

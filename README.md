@@ -4,6 +4,23 @@ A CPU-friendly research application for trilingual cyber threat intelligence agg
 
 Collected reports are source-attributed but are not independently verified advisories. Automated threat labels, severity assessments, and correlation candidates are preliminary unless human reviewed. Their rule scores are not calibrated probabilities. Candidate relationships never prove that reports describe the same incident or share an actor.
 
+## Stage 8: research evaluation and system validation
+
+Stage 8 records a reproducible evaluation of the completed Stages 1–7 without adding new analysis features. See the [research evaluation report](docs/research_evaluation_report.md), [system validation report](docs/system_validation_report.md), [reproducibility guide](docs/reproducibility.md), [final architecture](docs/final_architecture.md), and [known limitations](docs/known_limitations.md).
+
+Current research evidence is limited: the language evaluation contains 15 researcher-authored synthetic sanity-check examples and scores 100% on that tiny set; it is not a field-performance estimate. Threat classification, severity, correlation, and summary research datasets are empty, so those performance metrics are unavailable. No translation is implemented. On 2026-11-25, the four configured RSS feeds were reachable and parsed by the live collector (40 normalized entries, persistence disabled); future availability still depends on network, DNS, and publisher changes.
+
+The local SQLite file was inspected read-only: integrity check passed, with 43 article rows (3 demo and 40 collected). This snapshot has only the `articles` table, so it contains no stored Stage 4–7 history tables to validate. Automated migration and history behavior is tested using temporary databases.
+
+The validation review also fixed robots.txt handling so redirects are not treated as successful rules responses. Run the full verification with:
+
+```bash
+source .venv/bin/activate
+python -m pytest -v
+python -m compileall -q app.py src tests scripts
+git diff --check
+```
+
 ## Requirements and installation
 
 - Python 3.10 or newer
