@@ -18,16 +18,19 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 from ethio_cyber_intel.article_extractor import ArticleExtractor  # noqa: E402
 from ethio_cyber_intel.config import seed_demo_enabled  # noqa: E402
 from ethio_cyber_intel.dashboard_data import (  # noqa: E402
-    load_articles, load_current_classifications, load_current_correlations,
-    load_current_severity_assessments,
+    load_article_detail, load_articles, load_current_classifications,
+    load_current_correlations, load_current_severity_assessments, load_summary_history,
 )
 from ethio_cyber_intel.database import (  # noqa: E402
     assess_pending_articles, classify_pending_articles, correlate_pending_articles,
-    initialize_database, insert_live_articles, save_manual_correlation,
+    initialize_database, insert_live_articles, save_manual_correlation, save_summary_result,
 )
 from ethio_cyber_intel.language_detection import MIN_CONFIDENCE  # noqa: E402
 from ethio_cyber_intel.rss_collector import collect_all  # noqa: E402
 from ethio_cyber_intel.rss_sources import load_sources  # noqa: E402
+from ethio_cyber_intel.summarization import (  # noqa: E402
+    SUPPORTED_SUMMARY_LANGUAGES, summarize_article,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -217,6 +220,89 @@ def _render_correlations(correlations: pd.DataFrame, db_path: Path) -> None:
                     st.rerun()
 
 
+def _render_summary_workspace(articles: pd.DataFrame, labels: pd.DataFrame, db_path: Path) -> None:
+    st.subheader("Evidence-grounded article summary")
+    if articles.empty:
+        st.info("No stored articles are available to summarize.")
+        return
+    article_ids = articles["id"].astype(int).tolist()
+    selected_id = st.selectbox(
+        "Article", article_ids,
+        format_func=lambda article_id: (
+            f"{article_id} · {articles.loc[articles['id'] == article_id, 'title'].iloc[0]} "
+            f"[{('DEMO DATA' if int(articles.loc[articles['id'] == article_id, 'is_demo'].iloc[0]) else 'LIVE')}]"
+        ),
+        key="summary_article_id",
+    )
+    selected_row = articles.loc[articles["id"] == selected_id].iloc[0]
+    article_language = selected_row["language"]
+    default_lang = article_language if article_language in SUPPORTED_SUMMARY_LANGUAGES else "en"
+    language = st.selectbox(
+        "Requested summary language", SUPPORTED_SUMMARY_LANGUAGES,
+        index=SUPPORTED_SUMMARY_LANGUAGES.index(default_lang),
+        format_func=lambda code: LANGUAGE_NAMES.get(code, code), key="summary_language",
+    )
+    st.caption("Original-language extractive summaries retain source sentences. Cross-language translation is not available in this baseline.")
+    if int(selected_row["is_demo"]):
+        st.warning("DEMO DATA: this source is synthetic and not a real intelligence report.")
+    if st.button("Generate extractive summary", key="generate_summary"):
+        try:
+            detail = load_article_detail(int(selected_id), db_path)
+            article_label_rows = labels.loc[labels["article_id"] == selected_id] if not labels.empty else pd.DataFrame()
+            article_labels = article_label_rows["category"].tolist() if not article_label_rows.empty else []
+            detail["threat_categories"] = article_labels
+            detail["threat_category_status"] = article_label_rows.iloc[0]["status"] if not article_label_rows.empty else "unclassified"
+            result = summarize_article(detail, requested_language=language)
+            saved = save_summary_result(int(selected_id), result, db_path)
+            st.session_state["summary_generation_message"] = (
+                int(selected_id), language, result.status, saved
+            )
+        except Exception as exc:
+            logger.exception("Summary generation failed for article %s", selected_id)
+            st.error(f"Could not create summary: {exc}")
+    message = st.session_state.get("summary_generation_message")
+    if message and message[0] == int(selected_id) and message[1] == language:
+        _, _, status, saved = message
+        if saved.get("saved"):
+            st.success(f"Summary status: {status.replace('_', ' ')}")
+        elif saved.get("reason") == "duplicate_summary":
+            st.info("This source text already has a summary with the same method and version.")
+        elif saved.get("reason") == "human_review_preserved":
+            st.warning("A human-reviewed summary exists for this article and language; automatic output was not saved.")
+        else:
+            st.info(f"Summary status: {status.replace('_', ' ')}")
+    history = load_summary_history(int(selected_id), db_path)
+    if history.empty:
+        st.info("No summary history for this article yet.")
+        return
+    for _, row in history.iterrows():
+        label = f"{row['summary_status']} · {LANGUAGE_NAMES.get(row['summary_language'], row['summary_language'])} · {row['created_at']}"
+        with st.expander(label, expanded=True):
+            st.caption(f"Summary type: {row['summary_kind']} · Method: {row['summary_method']} v{row['method_version']}")
+            if row["summary_text"]:
+                st.write(row["summary_text"])
+            else:
+                st.info("No summary text was produced for this status.")
+            import json
+            source_metadata = json.loads(row["source_metadata_json"] or "{}")
+            source_language = source_metadata.get("source_language", "und")
+            if row["summary_kind"] == "original_language_extractive":
+                st.caption(f"Original-language extractive summary ({LANGUAGE_NAMES.get(source_language, source_language)}); this is not a translation.")
+            elif row["summary_kind"] == "translation_unavailable":
+                st.caption(f"Requested {LANGUAGE_NAMES.get(row['summary_language'], row['summary_language'])}; translation unavailable from {LANGUAGE_NAMES.get(source_language, source_language)}.")
+            st.markdown("**Key intelligence (reported evidence)**")
+            key_info = json.loads(row["key_intelligence_json"] or "{}")
+            st.json(key_info)
+            st.markdown("**Supporting source excerpts**")
+            excerpts = json.loads(row["supporting_evidence_json"] or "[]")
+            if excerpts:
+                st.json(excerpts)
+            else:
+                st.info("No summary excerpts were selected.")
+            st.markdown("**Original source metadata**")
+            st.json(source_metadata)
+            with st.expander("Exact source text used"):
+                st.text(row["source_text_used"])
 def _refresh(db_path: Path) -> None:
     sources = load_sources(enabled_only=True)
     if not sources:
@@ -540,7 +626,9 @@ def main() -> None:
         demo_display["Language"] = demo_display["Language"].map(LANGUAGE_NAMES)
         st.dataframe(demo_display[["Title", "Source", "Published", "Language", "Confidence", "Detection method", "Threat categories", "Category confidence (heuristic)", "Supporting evidence", "Classification method", "Classification status", "Severity", "Severity assessment status", "Severity explanation", "Severity supporting evidence", "Severity method", "Evidence completeness", "Original URL"]], use_container_width=True, hide_index=True)
 
-    st.caption("Collected reports are unverified source material. Threat categories and severity assessments are separate. Automated severity is preliminary; only documented evidence marked verified is treated as verified, and human review is authoritative.")
+    _render_summary_workspace(articles, labels, db_path)
+
+    st.caption("Collected reports are unverified source material. Threat categories, severity, correlation candidates, and summaries are separate analytical outputs; source claims are not thereby verified.")
 
 
 if __name__ == "__main__":

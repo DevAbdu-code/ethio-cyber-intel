@@ -127,6 +127,32 @@ CREATE INDEX IF NOT EXISTS idx_correlation_status
     ON correlation_assessments(status);
 """
 
+SUMMARY_SCHEMA = """
+CREATE TABLE IF NOT EXISTS article_summaries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    article_id INTEGER NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
+    summary_language TEXT NOT NULL CHECK (summary_language IN ('en','am','om')),
+    summary_text TEXT,
+    summary_method TEXT NOT NULL,
+    summary_status TEXT NOT NULL CHECK (summary_status IN (
+        'original_extractive','insufficient_content','unsupported_language',
+        'unsupported_translation','human_reviewed'
+    )),
+    supporting_evidence_json TEXT NOT NULL,
+    method_version TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    source_text_fingerprint TEXT NOT NULL,
+    source_text_used TEXT NOT NULL,
+    summary_kind TEXT NOT NULL,
+    key_intelligence_json TEXT NOT NULL,
+    source_metadata_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_summaries_article_latest
+    ON article_summaries(article_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_summaries_duplicate_check
+    ON article_summaries(article_id, summary_language, source_text_fingerprint, method_version);
+"""
+
 DEMO_ARTICLES = (
     {
         "title": "DEMO DATA: Example phishing awareness notice",
@@ -191,6 +217,7 @@ def initialize_database(
             _initialize_classification_schema(connection)
             _initialize_severity_schema(connection)
             _initialize_correlation_schema(connection)
+            _initialize_summary_schema(connection)
             count = connection.execute("SELECT COUNT(*) FROM articles").fetchone()[0]
             if seed_demo and count == 0:
                 _insert_demo_rows(connection, DEMO_ARTICLES)
@@ -238,6 +265,19 @@ def _initialize_correlation_schema(connection: sqlite3.Connection) -> None:
     connection.execute("BEGIN IMMEDIATE")
     try:
         for statement in CORRELATION_SCHEMA.split(";"):
+            if statement.strip():
+                connection.execute(statement)
+        connection.commit()
+    except sqlite3.Error:
+        connection.rollback()
+        raise
+
+
+def _initialize_summary_schema(connection: sqlite3.Connection) -> None:
+    """Create summary history transactionally without modifying article rows."""
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        for statement in SUMMARY_SCHEMA.split(";"):
             if statement.strip():
                 connection.execute(statement)
         connection.commit()
@@ -707,4 +747,74 @@ def correlate_pending_articles(
         return counts
     except sqlite3.Error:
         logger.exception("Could not correlate article pairs")
+        raise
+
+
+def save_summary_result(article_id: int, summary, db_path: str | Path | None = None) -> dict[str, int | bool | str]:
+    """Append an automated summary result, skipping duplicates and human reviews."""
+    value = summary.as_dict() if hasattr(summary, "as_dict") else dict(summary)
+    try:
+        with connect(db_path) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if not connection.execute("SELECT 1 FROM articles WHERE id=?", (article_id,)).fetchone():
+                raise ValueError(f"Article {article_id} does not exist")
+            if connection.execute(
+                """SELECT 1 FROM article_summaries WHERE article_id=? AND summary_language=?
+                   AND summary_status='human_reviewed' LIMIT 1""",
+                (article_id, value["summary_language"]),
+            ).fetchone():
+                return {"saved": False, "reason": "human_review_preserved"}
+            duplicate = connection.execute(
+                """SELECT id FROM article_summaries WHERE article_id=? AND summary_language=?
+                   AND source_text_fingerprint=? AND summary_method=? AND method_version=? LIMIT 1""",
+                (article_id, value["summary_language"], value["source_text_fingerprint"],
+                 value["method"], value["method_version"]),
+            ).fetchone()
+            if duplicate:
+                return {"saved": False, "reason": "duplicate_summary", "summary_id": int(duplicate["id"])}
+            cursor = connection.execute(
+                """INSERT INTO article_summaries
+                   (article_id,summary_language,summary_text,summary_method,summary_status,
+                    supporting_evidence_json,method_version,created_at,source_text_fingerprint,source_text_used,
+                    summary_kind,key_intelligence_json,source_metadata_json)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (article_id, value["summary_language"], value.get("summary_text"), value["method"],
+                 value["status"], json.dumps(value.get("supporting_evidence", []), ensure_ascii=False),
+                 value["method_version"], value["created_at"], value["source_text_fingerprint"],
+                 value["source_text_used"],
+                 value["summary_kind"], json.dumps(value.get("key_intelligence", {}), ensure_ascii=False),
+                 json.dumps(value.get("source_metadata", {}), ensure_ascii=False)),
+            )
+            return {"saved": True, "summary_id": int(cursor.lastrowid), "status": value["status"]}
+    except sqlite3.Error:
+        logger.exception("Could not save summary for article %s", article_id)
+        raise
+
+
+def save_manual_summary(
+    article_id: int, *, summary_language: str, summary_text: str,
+    source_text_fingerprint: str, source_text_used: str, supporting_evidence: Iterable[dict],
+    key_intelligence: dict, source_metadata: dict, db_path: str | Path | None = None,
+) -> int:
+    """Append a human-reviewed summary; later automation cannot replace it."""
+    try:
+        with connect(db_path) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if not connection.execute("SELECT 1 FROM articles WHERE id=?", (article_id,)).fetchone():
+                raise ValueError(f"Article {article_id} does not exist")
+            cursor = connection.execute(
+                """INSERT INTO article_summaries
+                   (article_id,summary_language,summary_text,summary_method,summary_status,
+                    supporting_evidence_json,method_version,created_at,source_text_fingerprint,source_text_used,
+                    summary_kind,key_intelligence_json,source_metadata_json)
+                   VALUES (?,?,?,'human_review','human_reviewed',?,?,?,?,?,'human-authored',?,?)""",
+                (article_id, summary_language, summary_text,
+                 json.dumps(list(supporting_evidence), ensure_ascii=False), "manual",
+                 datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                 source_text_fingerprint, source_text_used, json.dumps(key_intelligence, ensure_ascii=False),
+                 json.dumps(source_metadata, ensure_ascii=False)),
+            )
+            return int(cursor.lastrowid)
+    except sqlite3.Error:
+        logger.exception("Could not save human-reviewed summary for article %s", article_id)
         raise

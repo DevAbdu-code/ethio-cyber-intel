@@ -290,6 +290,80 @@ class DatabaseInitializationTests(unittest.TestCase):
         result = correlate_pending_articles(self.db_path)
         self.assertEqual(result["compared"], 0)
 
+    def test_stage_seven_summary_history_deduplication_and_human_protection(self):
+        from src.ethio_cyber_intel.database import (
+            assess_pending_articles, classify_pending_articles, connect,
+            correlate_pending_articles, insert_live_articles, save_manual_summary,
+            save_summary_result,
+        )
+        from src.ethio_cyber_intel.correlation import correlate_pair
+        from src.ethio_cyber_intel.dashboard_data import load_summary_history
+        from src.ethio_cyber_intel.summarization import source_fingerprint, summarize_article
+
+        initialize_database(self.db_path, seed_demo=False)
+        content = (
+            "Researchers analyzed CVE-2026-88990, a security issue in a network service. "
+            "The report says administrators should review the vendor guidance. "
+            "No exploitation status was independently confirmed in this test text."
+        )
+        insert_live_articles([{
+            "title": "Synthetic test report about a security issue",
+            "url": "https://news.example.test/summary-one", "source": "Test publisher",
+            "language": "en", "published_at": "2026-02-02T00:00:00Z", "content": content,
+        }, {
+            "title": "CVE-2026-88990 second language test report",
+            "url": "https://news.example.test/summary-two", "source": "Test publisher",
+            "language": "am", "content": "CVE-2026-88990 የደህንነት መረጃ።",
+        }], self.db_path)
+        classify_pending_articles(self.db_path)
+        assess_pending_articles(self.db_path)
+        correlate_pending_articles(self.db_path)
+        article = {"id": 1, "title": "Synthetic test report about a security issue",
+                   "source": "Test publisher", "url": "https://news.example.test/summary-one",
+                   "language": "en", "published_at": "2026-02-02T00:00:00Z", "content": content}
+        first_result = summarize_article(article)
+        self.assertEqual(save_summary_result(1, first_result, self.db_path)["saved"], True)
+        duplicate = save_summary_result(1, first_result, self.db_path)
+        self.assertEqual(duplicate["reason"], "duplicate_summary")
+
+        changed_content = content + " The final paragraph adds a separate synthetic source detail for history."
+        with connect(self.db_path) as connection:
+            connection.execute("UPDATE articles SET content=? WHERE id=1", (changed_content,))
+            before = dict(connection.execute("SELECT * FROM articles WHERE id=1").fetchone())
+            counts_before = {
+                "classifications": connection.execute("SELECT COUNT(*) FROM threat_classification_runs").fetchone()[0],
+                "severity": connection.execute("SELECT COUNT(*) FROM severity_assessments").fetchone()[0],
+                "correlations": connection.execute("SELECT COUNT(*) FROM correlation_assessments").fetchone()[0],
+            }
+        changed = dict(article, content=changed_content)
+        second_result = summarize_article(changed)
+        self.assertNotEqual(first_result.source_text_fingerprint, second_result.source_text_fingerprint)
+        self.assertTrue(save_summary_result(1, second_result, self.db_path)["saved"])
+        save_manual_summary(
+            1, summary_language="en", summary_text="Human-reviewed summary.",
+            source_text_fingerprint=source_fingerprint(changed_content), source_text_used=changed_content,
+            supporting_evidence=[],
+            key_intelligence={}, source_metadata={"source": "Test publisher"}, db_path=self.db_path,
+        )
+        protected = save_summary_result(1, second_result, self.db_path)
+        self.assertFalse(protected["saved"])
+        self.assertEqual(protected["reason"], "human_review_preserved")
+        initialize_database(self.db_path, seed_demo=False)
+        history = load_summary_history(1, self.db_path)
+        self.assertEqual(len(history), 3)
+        self.assertEqual(history.iloc[0]["summary_status"], "human_reviewed")
+        self.assertEqual(history.iloc[0]["source_text_used"], changed_content)
+        with connect(self.db_path) as connection:
+            after = dict(connection.execute("SELECT * FROM articles WHERE id=1").fetchone())
+            counts_after = {
+                "classifications": connection.execute("SELECT COUNT(*) FROM threat_classification_runs").fetchone()[0],
+                "severity": connection.execute("SELECT COUNT(*) FROM severity_assessments").fetchone()[0],
+                "correlations": connection.execute("SELECT COUNT(*) FROM correlation_assessments").fetchone()[0],
+            }
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM article_summaries WHERE article_id=1").fetchone()[0], 3)
+        self.assertEqual(after["content"], before["content"])
+        self.assertEqual(counts_after, counts_before)
+
 
 if __name__ == "__main__":
     unittest.main()

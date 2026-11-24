@@ -80,3 +80,25 @@ def load_current_correlations(db_path=None) -> pd.DataFrame:
                ORDER BY CASE c.status WHEN 'Candidate' THEN 0 ELSE 1 END,c.score DESC,c.id DESC""",
             connection,
         )
+
+
+def load_article_detail(article_id: int, db_path=None) -> dict | None:
+    """Load the source text and provenance for a selected summary operation."""
+    with connect(db_path) as connection:
+        row = connection.execute(
+            """SELECT id,title,source,published_at,language,summary,content,url,is_demo
+               FROM articles WHERE id=?""", (article_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def load_summary_history(article_id: int, db_path=None) -> pd.DataFrame:
+    """Return all extractive and human-reviewed summary records for an article."""
+    with connect(db_path) as connection:
+        return pd.read_sql_query(
+            """SELECT id AS summary_id,article_id,summary_language,summary_text,summary_method,
+                      summary_status,supporting_evidence_json,method_version,created_at,
+                      source_text_fingerprint,source_text_used,summary_kind,key_intelligence_json,source_metadata_json
+               FROM article_summaries WHERE article_id=? ORDER BY id DESC""",
+            connection, params=(article_id,),
+        )

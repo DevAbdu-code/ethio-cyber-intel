@@ -57,3 +57,30 @@ def test_dashboard_correlates_and_human_confirms_candidate(tmp_path, monkeypatch
     result = confirm.click().run()
     assert not result.exception
     assert any("Human confirmed" == metric.label and metric.value == "1" for metric in result.metric)
+
+
+def test_dashboard_summary_workspace_generates_and_displays_history(tmp_path, monkeypatch):
+    from src.ethio_cyber_intel.database import initialize_database, insert_live_articles
+
+    db_path = tmp_path / "summary.sqlite"
+    initialize_database(db_path, seed_demo=False)
+    content = (
+        "Researchers reviewed a security issue affecting network software. "
+        "The report identifies CVE-2026-99190 in its published details. "
+        "The source recommends that administrators review vendor guidance. "
+        "No independent exploitation confirmation is included in this test text."
+    )
+    insert_live_articles([{
+        "title": "Synthetic article selected for summary test",
+        "url": "https://example.test/summary", "source": "Synthetic source",
+        "language": "en", "published_at": None, "content": content,
+    }], db_path)
+    monkeypatch.setenv("ETHIO_CYBER_DB_PATH", str(db_path))
+    app_path = Path(__file__).resolve().parents[1] / "app.py"
+    result = AppTest.from_file(str(app_path)).run()
+    assert not result.exception
+    assert any("Evidence-grounded article summary" in item.value for item in result.subheader)
+    action = next(button for button in result.button if button.label == "Generate extractive summary")
+    result = action.click().run()
+    assert not result.exception
+    assert any("original_extractive" in expander.label for expander in result.expander)

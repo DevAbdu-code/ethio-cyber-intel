@@ -1,6 +1,6 @@
 # ETHIO-CYBER INTEL
 
-A CPU-friendly research application for trilingual cyber threat intelligence aggregation and analysis. Stage 1 provides the Streamlit dashboard and SQLite store; Stage 2 adds configurable RSS collection and careful article extraction; Stage 3 adds conservative language detection; Stage 4 adds preliminary, explainable multi-label threat categorization; Stage 5 adds conservative evidence-based severity triage; Stage 6 adds candidate relationship discovery across reports.
+A CPU-friendly research application for trilingual cyber threat intelligence aggregation and analysis. Stage 1 provides the Streamlit dashboard and SQLite store; Stage 2 adds configurable RSS collection and careful article extraction; Stage 3 adds conservative language detection; Stage 4 adds preliminary, explainable multi-label threat categorization; Stage 5 adds conservative evidence-based severity triage; Stage 6 adds candidate relationship discovery; Stage 7 adds evidence-grounded extractive summaries.
 
 Collected reports are source-attributed but are not independently verified advisories. Automated threat labels, severity assessments, and correlation candidates are preliminary unless human reviewed. Their rule scores are not calibrated probabilities. Candidate relationships never prove that reports describe the same incident or share an actor.
 
@@ -145,6 +145,30 @@ python scripts/evaluate_correlation.py
 
 Do not copy synthetic tests into the research evaluation dataset.
 
+## Stage 7: evidence-grounded summarization
+
+The summary baseline supports source-language extraction for articles labeled English (`en`), Amharic (`am`), and Afaan Oromo (`om`). It ranks source sentences with token-frequency centrality and small, transparent CVE/impact/exploitation evidence boosts, then returns selected sentences verbatim in the original order. It is deterministic, CPU-only, and does not use a language model.
+
+**Extractive summary** means selected text copied directly from the source. This release does not generate a paraphrase or translate. If a requested output language differs from the detected source language, the result is saved with status `unsupported_translation` and no summary text. Unknown, mixed, or unsupported source languages return `unsupported_language`; source material below the minimum length or without enough sentence evidence returns `insufficient_content`. A dashboard language selector is available, but it does not imply translation capability. No paid translation API or multilingual generation model is used.
+
+Every summary history row stores the article ID, requested/original summary language, exact source text used, source text fingerprint, selected source excerpts, source metadata (title, publication date, source, URL and detected language), summary method/version, status, key intelligence, and timestamp. The exact original source URL is preserved. Missing publication dates are shown as Unknown. CVEs are extracted only when present in source text. Product and malware names require explicit source labeling. Threat categories are copied from Stage 4 only when supplied and are labeled preliminary automated outputs. Impact and exploitation excerpts are marked as reported claims, not verified facts. Missing entities and claims remain “Not reported”; no actor attribution or CVE details are generated.
+
+Current key-intelligence phrase extraction for impacts and exploitation is English-focused; only identifier extraction and explicitly labeled entities are more language-neutral. Sentence selection itself preserves English, Amharic, or Afaan Oromo text exactly, but this does not establish that a selected summary is readable, complete, or useful in those languages. Afaan Oromo and Amharic require review by fluent readers. We do not claim quality parity across languages.
+
+**Local model practicality assessment:** no local model was added or benchmarked in this stage because extractive sentence selection satisfies the no-download, CPU-only baseline and avoids unvalidated generated text. A possible later translation adapter is QVAC TranslatePsy-AfriSLM: its publisher lists support for Amharic and Oromo and 4-bit variants, with the 0.8B model listed at about 0.7 GB and described as running on laptops without a GPU ([model details](https://qvac.tether.io/models/translatepsy), [model card](https://huggingface.co/qvac/TranslatePsy-AfriSLM-4B)). Those are publisher specifications, not ETHIO-CYBER INTEL measurements. It is a translation model, not a summarizer; its latency, peak RAM, CTI terminology fidelity, and pairwise quality on Amharic/Afaan Oromo cybersecurity text have not been tested here. It was therefore not installed or enabled. Any future adapter needs human-reviewed language-pair evaluation and a license/runtime review before use.
+
+The dashboard’s **Evidence-grounded article summary** workspace selects an article and requested language, generates an extractive summary, and shows its status, key intelligence, supporting excerpts, source metadata, and source-text snapshot. It keeps prior summaries visible. Identical source text, language, method, and version are not written twice. A human-reviewed summary is preserved and blocks later automatic writes for that article/language. Summary status distinguishes original extractive output from unavailable translation and insufficient or unsupported input.
+
+### Stage 7 evaluation
+
+The separate [`evaluation/summary_eval.jsonl`](evaluation/summary_eval.jsonl) dataset is empty until reviewed examples are added. Factual consistency, important-information coverage, language correctness, readability, usefulness, and unsupported-claim rate are therefore **unavailable**. The evaluator reports ratings overall and separately for `en`, `am`, and `om`; Amharic/Afaan Oromo review should involve fluent readers, preferably independent reviewers. See [`evaluation/summary_evaluation.md`](evaluation/summary_evaluation.md) for the record schema and provenance rules. Evaluators rate the exact output from the recorded method version; the script does not itself determine factuality or readability. Run:
+
+```bash
+python scripts/evaluate_summaries.py
+```
+
+Do not copy synthetic unit-test text into the research dataset.
+
 ## Tests and compilation
 
 ```bash
@@ -175,6 +199,7 @@ Database initialization migrates the existing articles table transactionally, pr
 - Stage 4 classification is a hand-built phrase baseline, not a learned classifier. Coverage is incomplete, scores are uncalibrated, and the current threat evaluation dataset is empty.
 - Stage 5 severity is a conservative report-evidence triage policy, not organizational risk scoring, incident validation, or calibrated prediction. Current dashboard assessments use article text only; no external source has been queried. Severity evaluation data is empty.
 - Stage 6 correlation is candidate retrieval, not incident adjudication. Cross-language detection depends mainly on shared explicit identifiers/entity names and misses reports that paraphrase without such anchors. Direct word/character overlap is not cross-language semantic understanding. There are no manually reviewed research pairs, so performance is unmeasured.
+- Stage 7 summaries are extractive and source-language only. Translation and abstractive generation are not implemented. Current impact/exploitation phrase extraction is English-focused, and the human evaluation set is empty.
 - The current evaluation data is synthetic and too small to support research conclusions. Build a permissioned, manually reviewed corpus before reporting accuracy as a real-world result.
 - Multilingual summaries are not part of this stage.
 
@@ -194,6 +219,7 @@ src/ethio_cyber_intel/
   threat_classification.py              Evidence-producing multilingual rules baseline
   severity_assessment.py               Evidence-led severity triage rules
   correlation.py                        Explainable cross-language candidate matching
+  summarization.py                      CPU-only extractive summary and evidence extraction
   rss_collector.py                      RSS fetching and normalization
   rss_sources.py                        RSS configuration validation
 tests/                                  Offline tests and separate synthetic fixtures
@@ -203,4 +229,6 @@ evaluation/severity_eval.jsonl         Empty, manually reviewed severity evaluat
 scripts/evaluate_severity.py             Severity agreement and classification metrics
 evaluation/correlation_eval.jsonl       Empty, manually reviewed article-pair evaluation set
 scripts/evaluate_correlation.py          Candidate retrieval evaluation metrics
+evaluation/summary_eval.jsonl            Empty, manually reviewed summary evaluation set
+scripts/evaluate_summaries.py             Human-rating summary evaluation metrics
 ```
