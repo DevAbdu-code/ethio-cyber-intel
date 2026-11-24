@@ -45,14 +45,19 @@ def normalize_entry(
         return None
     description = clean_html(entry.get("summary") or entry.get("description"))
     content = ""
+    content_validation_status = "not_available"
     for block in entry.get("content", []) or []:
         content = clean_html(block.get("value", ""))
         if content:
+            content_validation_status = "rss_feed_entry"
             break
     if not content and extractor:
         content = extractor.extract(
-            link, allowed_hostname=source.hostname, delay_seconds=source.delay_seconds
+            link, allowed_hostname=source.hostname, expected_title=title,
+            delay_seconds=source.delay_seconds,
         ) or ""
+        if content:
+            content_validation_status = "page_identity_verified"
     detection = detect_article_language(
         title=title,
         description=description,
@@ -69,6 +74,7 @@ def normalize_entry(
         "language_reviewed": 0,
         "summary": description or None,
         "content": content or None,
+        "content_validation_status": content_validation_status,
     }
 
 

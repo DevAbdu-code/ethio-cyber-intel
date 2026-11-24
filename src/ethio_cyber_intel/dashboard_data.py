@@ -13,7 +13,7 @@ def load_articles(db_path=None) -> pd.DataFrame:
         return pd.read_sql_query(
             """SELECT id, title, source, published_at, language, language_confidence,
                       language_method, language_reviewed, summary, threat_type,
-                      report_status, is_demo, fetched_at, url
+                      content_validation_status, report_status, is_demo, fetched_at, url
                FROM articles ORDER BY COALESCE(published_at, fetched_at) DESC, id DESC""",
             connection,
         )
@@ -86,7 +86,10 @@ def load_article_detail(article_id: int, db_path=None) -> dict | None:
     """Load the source text and provenance for a selected summary operation."""
     with connect(db_path) as connection:
         row = connection.execute(
-            """SELECT id,title,source,published_at,language,summary,content,url,is_demo
+            """SELECT id,title,source,published_at,language,summary,
+                      CASE WHEN content_validation_status IN ('rss_feed_entry','page_identity_verified')
+                           THEN content ELSE NULL END AS content,
+                      content_validation_status,url,is_demo
                FROM articles WHERE id=?""", (article_id,)
         ).fetchone()
         return dict(row) if row else None

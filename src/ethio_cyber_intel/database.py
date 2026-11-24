@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Iterable
 
 from .config import database_path
+from .language_detection import detect_article_language
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,7 @@ CREATE TABLE IF NOT EXISTS articles (
     language_reviewed INTEGER NOT NULL DEFAULT 0 CHECK (language_reviewed IN (0, 1)),
     summary TEXT,
     content TEXT,
+    content_validation_status TEXT NOT NULL DEFAULT 'legacy_unverified',
     content_fingerprint TEXT,
     threat_type TEXT NOT NULL DEFAULT 'Unclassified',
     report_status TEXT NOT NULL DEFAULT 'collected'
@@ -198,9 +200,9 @@ def _insert_demo_rows(connection: sqlite3.Connection, rows: Iterable[dict]) -> N
     connection.executemany(
         """INSERT OR IGNORE INTO articles
            (title, url, source, published_at, language, summary, threat_type,
-            report_status, is_demo)
+            report_status, is_demo, content_validation_status)
            VALUES (:title, :url, :source, :published_at, :language, :summary,
-                   :threat_type, 'demo', 1)""",
+                   :threat_type, 'demo', 1, 'not_available')""",
         rows,
     )
 
@@ -214,6 +216,7 @@ def initialize_database(
         with connect(path) as connection:
             _migrate_articles_table(connection)
             connection.executescript(SCHEMA)
+            _migrate_article_content_status(connection)
             _initialize_classification_schema(connection)
             _initialize_severity_schema(connection)
             _initialize_correlation_schema(connection)
@@ -309,6 +312,7 @@ def _migrate_articles_table(connection: sqlite3.Connection) -> None:
     preservable_columns = [
         "id", "title", "url", "source", "published_at", "language", "summary",
         "language_confidence", "language_method", "language_reviewed", "content",
+        "content_validation_status",
         "content_fingerprint", "threat_type", "report_status", "is_demo", "fetched_at",
         "created_at",
     ]
@@ -329,6 +333,29 @@ def _migrate_articles_table(connection: sqlite3.Connection) -> None:
                   language_method = 'legacy_existing_label'
            WHERE is_demo = 0 AND language IN ('en', 'am', 'om')
              AND language_method IS NULL"""
+    )
+    connection.commit()
+
+
+def _migrate_article_content_status(connection: sqlite3.Connection) -> None:
+    """Add extraction provenance without rebuilding the article table."""
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(articles)")}
+    if "content_validation_status" not in columns:
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            connection.execute(
+                "ALTER TABLE articles ADD COLUMN content_validation_status TEXT NOT NULL DEFAULT 'legacy_unverified'"
+            )
+            connection.commit()
+        except sqlite3.Error:
+            connection.rollback()
+            raise
+    # Old stored body text predates page identity validation. Keep it intact but
+    # prevent downstream analysis from treating it as verified article content.
+    connection.execute(
+        """UPDATE articles SET content_validation_status='not_available'
+           WHERE content_validation_status='legacy_unverified'
+             AND (content IS NULL OR TRIM(content)='')"""
     )
     connection.commit()
 
@@ -361,6 +388,10 @@ def insert_live_articles(
                 values.setdefault("published_at", None)
                 values.setdefault("summary", None)
                 values.setdefault("content", None)
+                values.setdefault(
+                    "content_validation_status",
+                    "legacy_unverified" if values.get("content") else "not_available",
+                )
                 values["language"] = values.get("language") or "und"
                 values.setdefault("language_confidence", None)
                 values.setdefault("language_method", "not_detected")
@@ -376,10 +407,12 @@ def insert_live_articles(
                         """INSERT INTO articles
                            (title, url, source, published_at, language, language_confidence,
                             language_method, language_reviewed, summary, content,
+                            content_validation_status,
                             content_fingerprint, threat_type, report_status, is_demo)
                            VALUES (:title, :url, :source, :published_at, :language,
                                    :language_confidence, :language_method, :language_reviewed,
-                                   :summary, :content, :content_fingerprint, :threat_type,
+                                   :summary, :content, :content_validation_status,
+                                   :content_fingerprint, :threat_type,
                                    :report_status, :is_demo)""",
                         values,
                     )
@@ -400,6 +433,46 @@ def insert_live_articles(
         }
     except sqlite3.Error:
         logger.exception("Failed to insert live articles")
+        raise
+
+
+def detect_legacy_article_languages(
+    db_path: str | Path | None = None,
+) -> dict[str, int]:
+    """Detect languages for untouched legacy LIVE rows, never human-reviewed rows.
+
+    Only the source-attributed title and RSS description are used. Existing
+    content is excluded because older extraction runs may have stored unrelated
+    page modules. Existing language, confidence, and method values are never
+    replaced; only unreviewed `und` rows with no method are eligible.
+    """
+    scanned = updated = unknown = 0
+    try:
+        with connect(db_path) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                """SELECT id,title,summary FROM articles
+                   WHERE is_demo=0 AND language='und' AND language_reviewed=0
+                     AND language_method IS NULL ORDER BY id"""
+            ).fetchall()
+            scanned = len(rows)
+            for row in rows:
+                detection = detect_article_language(
+                    title=row["title"], description=row["summary"], content=None
+                )
+                cursor = connection.execute(
+                    """UPDATE articles SET language=?, language_confidence=?, language_method=?
+                       WHERE id=? AND is_demo=0 AND language='und'
+                         AND language_reviewed=0 AND language_method IS NULL""",
+                    (detection.language, detection.confidence, detection.method, row["id"]),
+                )
+                if cursor.rowcount:
+                    updated += 1
+                    unknown += detection.language == "und"
+            connection.commit()
+        return {"scanned": scanned, "updated": updated, "unknown": unknown}
+    except sqlite3.Error:
+        logger.exception("Could not detect legacy article languages")
         raise
 
 
@@ -497,7 +570,10 @@ def classify_pending_articles(db_path: str | Path | None = None) -> dict[str, in
     try:
         with connect(db_path) as connection:
             articles = connection.execute(
-                """SELECT a.id, a.title, a.summary, a.content, a.language
+                """SELECT a.id, a.title, a.summary,
+                          CASE WHEN a.content_validation_status IN ('rss_feed_entry','page_identity_verified')
+                               THEN a.content ELSE NULL END AS content,
+                          a.language
                    FROM articles AS a
                    WHERE NOT EXISTS (
                        SELECT 1 FROM threat_classification_runs AS r WHERE r.article_id = a.id
@@ -584,7 +660,9 @@ def assess_pending_articles(db_path: str | Path | None = None) -> dict[str, int]
     try:
         with connect(db_path) as connection:
             rows = connection.execute(
-                """SELECT a.id,a.title,a.source,a.url,a.published_at,a.summary,a.content
+                """SELECT a.id,a.title,a.source,a.url,a.published_at,a.summary,
+                          CASE WHEN a.content_validation_status IN ('rss_feed_entry','page_identity_verified')
+                               THEN a.content ELSE NULL END AS content
                    FROM articles a WHERE NOT EXISTS
                    (SELECT 1 FROM severity_assessments s WHERE s.article_id=a.id)
                    ORDER BY a.id"""
@@ -725,7 +803,9 @@ def correlate_pending_articles(
     try:
         with connect(db_path) as connection:
             articles = [dict(row) for row in connection.execute(
-                """SELECT id,title,source,url,published_at,language,summary,content
+                """SELECT id,title,source,url,published_at,language,summary,
+                          CASE WHEN content_validation_status IN ('rss_feed_entry','page_identity_verified')
+                               THEN content ELSE NULL END AS content
                    FROM articles WHERE is_demo=0
                    ORDER BY COALESCE(published_at,fetched_at) DESC,id DESC LIMIT ?""",
                 (article_limit,),

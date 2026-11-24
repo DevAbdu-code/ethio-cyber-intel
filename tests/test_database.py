@@ -5,7 +5,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from src.ethio_cyber_intel.database import initialize_database
+from src.ethio_cyber_intel.database import (
+    assess_pending_articles, classify_pending_articles, connect,
+    detect_legacy_article_languages, initialize_database,
+)
+from src.ethio_cyber_intel.dashboard_data import load_article_detail
 
 
 class DatabaseInitializationTests(unittest.TestCase):
@@ -15,6 +19,107 @@ class DatabaseInitializationTests(unittest.TestCase):
 
     def tearDown(self):
         self.temp_dir.cleanup()
+
+    def test_legacy_language_backfill_uses_feed_text_and_preserves_reviewed_rows(self):
+        initialize_database(self.db_path, seed_demo=False)
+        with sqlite3.connect(self.db_path) as connection:
+            connection.executemany(
+                """INSERT INTO articles (title,url,source,language,language_confidence,
+                   language_method,language_reviewed,summary,report_status,is_demo)
+                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                [
+                    ("The vendor released an emergency security patch for customer accounts",
+                     "https://example.test/legacy-language", "Example News", "und", None,
+                     None, 0, "The company said the update fixes a security flaw affecting public users.",
+                     "collected", 0),
+                    ("Reviewed title", "https://example.test/reviewed", "Example News", "om", 0.91,
+                     "human_reviewed", 1, "Reviewed label", "collected", 0),
+                ],
+            )
+
+        stats = detect_legacy_article_languages(self.db_path)
+        with sqlite3.connect(self.db_path) as connection:
+            legacy = connection.execute(
+                "SELECT language,language_confidence,language_method,language_reviewed FROM articles WHERE url=?",
+                ("https://example.test/legacy-language",),
+            ).fetchone()
+            reviewed = connection.execute(
+                "SELECT language,language_confidence,language_method,language_reviewed FROM articles WHERE url=?",
+                ("https://example.test/reviewed",),
+            ).fetchone()
+
+        self.assertEqual(stats, {"scanned": 1, "updated": 1, "unknown": 0})
+        self.assertEqual(legacy[0], "en")
+        self.assertGreaterEqual(legacy[1], 0.60)
+        self.assertEqual(legacy[2:], ("lexical_cues_en", 0))
+        self.assertEqual(reviewed, ("om", 0.91, "human_reviewed", 1))
+
+    def test_content_validation_migration_preserves_article_and_analysis_history(self):
+        initialize_database(self.db_path, seed_demo=False)
+        with connect(self.db_path) as connection:
+            cursor = connection.execute(
+                """INSERT INTO articles (title,url,source,language,summary,content,is_demo,report_status)
+                   VALUES (?,?,?,?,?,?,0,'collected')""",
+                ("Legacy article", "https://example.test/legacy-content", "Example News", "und",
+                 "RSS description retained", "Old potentially unrelated page text"),
+            )
+            article_id = cursor.lastrowid
+            run_id = connection.execute(
+                """INSERT INTO threat_classification_runs
+                   (article_id,language,method,classifier_version,status,classified_at)
+                   VALUES (?,?,?,?,?,?)""",
+                (article_id, "und", "test", "1", "unknown", "2026-01-01T00:00:00Z"),
+            ).lastrowid
+            connection.execute(
+                "INSERT INTO threat_classification_labels (run_id,category,confidence,evidence_json) VALUES (?,?,?,?)",
+                (run_id, "unknown", 0.0, "[]"),
+            )
+            connection.execute("ALTER TABLE articles DROP COLUMN content_validation_status")
+
+        initialize_database(self.db_path, seed_demo=False)
+        with connect(self.db_path) as connection:
+            article = connection.execute(
+                "SELECT title,summary,content,content_validation_status FROM articles WHERE id=?",
+                (article_id,),
+            ).fetchone()
+            label_count = connection.execute(
+                """SELECT COUNT(*) FROM threat_classification_labels l
+                   JOIN threat_classification_runs r ON r.id=l.run_id WHERE r.article_id=?""",
+                (article_id,),
+            ).fetchone()[0]
+            fk_violations = connection.execute("PRAGMA foreign_key_check").fetchall()
+        self.assertEqual(tuple(article), (
+            "Legacy article", "RSS description retained", "Old potentially unrelated page text",
+            "legacy_unverified",
+        ))
+        self.assertEqual(label_count, 1)
+        self.assertEqual(fk_violations, [])
+        detail = load_article_detail(article_id, self.db_path)
+        self.assertIsNone(detail["content"])
+        self.assertEqual(detail["content_validation_status"], "legacy_unverified")
+
+    def test_unverified_legacy_body_is_excluded_from_classification_and_severity(self):
+        initialize_database(self.db_path, seed_demo=False)
+        with connect(self.db_path) as connection:
+            connection.execute(
+                """INSERT INTO articles (title,url,source,language,summary,content,is_demo,report_status)
+                   VALUES (?,?,?,?,?,?,0,'collected')""",
+                ("Routine vendor update", "https://example.test/unverified-body", "Example News", "en",
+                 "The vendor published a routine software update for its customers.",
+                 "Ransomware campaign exploited CVE-2026-12345; CVSS score: 9.8."),
+            )
+        classify_pending_articles(self.db_path)
+        assess_pending_articles(self.db_path)
+        with connect(self.db_path) as connection:
+            category = connection.execute(
+                """SELECT l.category FROM threat_classification_labels l
+                   JOIN threat_classification_runs r ON r.id=l.run_id LIMIT 1"""
+            ).fetchone()[0]
+            severity = connection.execute(
+                "SELECT severity FROM severity_assessments LIMIT 1"
+            ).fetchone()[0]
+        self.assertEqual(category, "unknown")
+        self.assertEqual(severity, "Unknown")
 
     def test_initialization_seeds_trilingual_demo_rows_once(self):
         initialize_database(self.db_path, seed_demo=True)

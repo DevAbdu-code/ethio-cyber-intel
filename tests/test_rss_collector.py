@@ -48,6 +48,7 @@ class RSSCollectorTests(unittest.TestCase):
         self.assertEqual(article["language_method"], "lexical_cues_en")
         self.assertGreaterEqual(article["language_confidence"], 0.60)
         self.assertEqual(article["url"], "https://news.example.test/report-1")
+        self.assertEqual(article["content_validation_status"], "not_available")
 
     def test_normalized_rss_entry_receives_language_metadata(self):
         article = normalize_entry({

@@ -49,6 +49,28 @@ def test_missing_identifiers_do_not_create_cross_language_match_from_terms_alone
     assert not result.shared_entities
 
 
+def test_legacy_unverified_body_does_not_create_cross_language_correlation(tmp_path):
+    from src.ethio_cyber_intel.database import correlate_pending_articles, initialize_database, insert_live_articles
+
+    db_path = tmp_path / "legacy-body-correlation.sqlite"
+    initialize_database(db_path, seed_demo=False)
+    shared_body = "CVE-2026-99123 malware campaign affected an enterprise network. " * 12
+    insert_live_articles([
+        {"title": "Quarterly infrastructure update", "url": "https://example.test/live-en",
+         "source": "Synthetic EN", "language": "en", "summary": "A routine service update was published.",
+         "content": shared_body},
+        {"title": "Tajaajila bulchiinsa naannoo", "url": "https://example.test/live-om",
+         "source": "Synthetic OM", "language": "om", "summary": "Tajaajilli yeroo isaa irratti ibsame.",
+         "content": shared_body},
+    ], db_path)
+
+    stats = correlate_pending_articles(db_path)
+
+    assert stats["compared"] == 1
+    assert stats["candidates"] == 0
+    assert stats["saved"] == 0
+
+
 def test_same_language_content_similarity_can_create_candidate_without_identifier():
     text = ("Attackers accessed a customer database and copied private records after "
             "compromising the organization's exposed cloud service during January.")

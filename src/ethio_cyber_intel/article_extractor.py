@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
+import unicodedata
+from difflib import SequenceMatcher
 from urllib.robotparser import RobotFileParser
 from urllib.parse import urlparse
 
@@ -14,6 +17,8 @@ from .config import request_timeout
 
 logger = logging.getLogger(__name__)
 USER_AGENT = "ETHIO-CYBER-INTEL/0.2 (+local research RSS reader)"
+MIN_ARTICLE_TEXT_LENGTH = 250
+_TITLE_WORD_RE = re.compile(r"[a-z0-9]+", re.IGNORECASE)
 
 
 def clean_html(value: str | None) -> str:
@@ -24,6 +29,26 @@ def clean_html(value: str | None) -> str:
     for node in soup(["script", "style", "noscript", "svg", "iframe"]):
         node.decompose()
     return " ".join(soup.get_text(" ", strip=True).split())
+
+
+def _canonical_path(url: str) -> tuple[str, str] | None:
+    """Return normalized host/path identity, excluding harmless query strings."""
+    parsed = urlparse(url)
+    if parsed.scheme.lower() != "https" or not parsed.hostname or parsed.username or parsed.password:
+        return None
+    return parsed.hostname.lower(), parsed.path.rstrip("/") or "/"
+
+
+def _title_matches(expected: str, observed: str) -> bool:
+    """Conservatively compare feed and page headlines without requiring equality."""
+    expected_norm = unicodedata.normalize("NFKC", expected).casefold()
+    observed_norm = unicodedata.normalize("NFKC", observed).casefold()
+    expected_words = set(_TITLE_WORD_RE.findall(expected_norm))
+    observed_words = set(_TITLE_WORD_RE.findall(observed_norm))
+    overlap = expected_words & observed_words
+    coverage = len(overlap) / max(1, len(expected_words))
+    sequence_ratio = SequenceMatcher(None, expected_norm, observed_norm).ratio()
+    return len(overlap) >= 2 and max(coverage, sequence_ratio) >= 0.60
 
 
 class ArticleExtractor:
@@ -60,11 +85,19 @@ class ArticleExtractor:
             self._robots[origin] = None
         return self._robots[origin]
 
-    def extract(self, url: str, *, allowed_hostname: str, delay_seconds: float = 0.5) -> str | None:
-        """Return readable article text, or None if inaccessible or disallowed."""
+    def extract(
+        self, url: str, *, allowed_hostname: str, expected_title: str | None = None,
+        delay_seconds: float = 0.5,
+    ) -> str | None:
+        """Return article text only when URL, page headline, and body agree.
+
+        Missing identity evidence fails closed. RSS metadata remains available to
+        the caller when extraction is declined.
+        """
         parsed = urlparse(url)
         host = (parsed.hostname or "").lower()
-        if parsed.scheme != "https" or not host or host != allowed_hostname.lower():
+        if (parsed.scheme != "https" or not host or host != allowed_hostname.lower()
+                or not expected_title or not expected_title.strip()):
             return None
         origin = f"https://{host}"
         robots = self._robots_for(origin)
@@ -88,8 +121,49 @@ class ArticleExtractor:
         if "html" not in response.headers.get("Content-Type", "").lower():
             return None
         soup = BeautifulSoup(response.content, "html.parser")
-        for node in soup(["script", "style", "noscript", "svg", "iframe", "nav", "footer", "header"]):
+
+        canonical = soup.find("link", rel=lambda value: value and "canonical" in value)
+        if canonical and canonical.get("href"):
+            actual_identity = _canonical_path(url)
+            canonical_identity = _canonical_path(canonical["href"])
+            if actual_identity is None or canonical_identity != actual_identity:
+                logger.info("Canonical URL does not match requested article URL: %s", url)
+                return None
+
+        page_titles = []
+        for attrs in ({"property": "og:title"}, {"name": "twitter:title"}):
+            node = soup.find("meta", attrs=attrs)
+            if node and node.get("content"):
+                page_titles.append(node["content"].strip())
+        page_titles.extend(node.get_text(" ", strip=True) for node in soup.find_all("h1"))
+        if soup.title:
+            page_titles.append(soup.title.get_text(" ", strip=True))
+        if not any(_title_matches(expected_title, title) for title in page_titles if title):
+            logger.info("Page headline does not match RSS title; skipping extraction for %s", url)
+            return None
+
+        for node in soup(["script", "style", "noscript", "svg", "iframe", "nav", "footer", "header", "aside"]):
             node.decompose()
-        main = soup.find("article") or soup.find("main") or soup.body or soup
-        text = " ".join(main.get_text(" ", strip=True).split())
-        return text or None
+
+        # Prefer explicit article-body containers. Many publishers use <article>
+        # for recommendation cards, so the first generic article element is not
+        # evidence that it contains the requested report.
+        candidates = []
+        for selector in (
+            '[itemprop="articleBody"]', "#articlebody", "#article-body",
+            ".article-body", ".article-content", ".post-body", ".entry-content",
+            ".story-body",
+        ):
+            candidates.extend(soup.select(selector))
+        if not candidates:
+            candidates.extend(
+                node for node in soup.find_all("article")
+                if _title_matches(expected_title, node.get_text(" ", strip=True))
+            )
+
+        for candidate in candidates:
+            text = " ".join(candidate.get_text(" ", strip=True).split())
+            if len(text) >= MIN_ARTICLE_TEXT_LENGTH:
+                return text
+        logger.info("No sufficiently substantial article body matched %s", url)
+        return None

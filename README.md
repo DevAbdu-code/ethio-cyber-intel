@@ -21,6 +21,8 @@ python -m compileall -q app.py src tests scripts
 git diff --check
 ```
 
+For the follow-up pipeline investigation, see the [RSS, extraction, language, and processing validation report](docs/pipeline_validation_report.md). It documents the THN article-body mismatch, the verified legacy-language backfill, the backed-up additive SQLite migration, and current processing counts.
+
 ## Requirements and installation
 
 - Python 3.10 or newer
@@ -45,7 +47,7 @@ streamlit run app.py
 
 Click **Refresh Intelligence** to check each enabled RSS source and collect new entries. A failed feed does not block other sources. Edit [`config/rss_sources.json`](config/rss_sources.json) to enable, disable, or change feed candidates. A configured feed is not necessarily available; the dashboard reports its status on refresh.
 
-If the feed has no full article body, extraction is attempted only for same-host HTTPS pages allowed by the publisher's `robots.txt`. Requests are timed out, not redirected, and rate limited. The RSS title, description, URL, source, and publication date are retained when article-body extraction is unavailable.
+If the feed has no full article body, extraction is attempted only for same-host HTTPS pages allowed by the publisher's `robots.txt`. The page's canonical URL and headline must match the requested RSS item, and extraction prefers explicit article-body containers rather than the first generic `<article>` element (which may be a recommendation card). Requests are timed out, not redirected, and rate limited. If page identity cannot be validated, the RSS title, description, URL, source, and publication date are retained and page content is omitted.
 
 ## Stage 3: language detection
 
@@ -62,6 +64,8 @@ Supported labels:
 The detector lives in `src/ethio_cyber_intel/language_detection.py`. It detects Amharic using Ethiopic Unicode-script evidence and uses a small, explicit set of English and Afaan Oromo lexical cues for Latin-script text. Clearly distinct language spans or a mixture of substantial script and lexical evidence can produce `mul`. Very short text, unsupported language text, and weak or conflicting evidence stay `und`.
 
 Each result has a confidence score and method. The score measures strength of these rules; it is **not a calibrated probability**. Afaan Oromo uses the Latin alphabet, so distinguishing it from English through a small cue list is inherently uncertain. Oromo results require careful review and validation against a much larger, independently labeled and representative dataset before any reliability claim. This stage does not claim language parity or production-grade accuracy.
+
+The dashboard separates language not yet assessed from a detector result of `und`. Use **Detect language for legacy reports** to process only untouched LIVE rows with `und`, no method, and no human review. That one-time path uses only the source title and RSS description, records the existing detector's method/confidence, and leaves uncertain results as `und`.
 
 During RSS normalization, the detector prefers full article text when available and otherwise evaluates the title and description together. Existing records are not silently relabeled. New database fields store `language_confidence`, `language_method`, and `language_reviewed`; reviewed labels are preserved. Demo examples retain their explicit labels and are marked as demo-labeled examples.
 
@@ -205,7 +209,7 @@ RSS tests use mocked feeds and make no live network requests. The dashboard comp
 | `ETHIO_CYBER_FEEDS_FILE` | `config/rss_sources.json` | RSS source JSON file |
 | `ETHIO_CYBER_HTTP_TIMEOUT` | `12` | HTTP timeout in seconds |
 
-Database initialization migrates the existing articles table transactionally, preserves row IDs and article content, and adds the `mul` language value plus confidence/method/review fields. SQLite requires a table migration to update the existing language `CHECK` constraint. The migration copies all existing columns and values into the updated table; it does not delete or recreate the database file. Existing language labels are not re-detected or overwritten. Legacy records without detection metadata remain marked `und`/not assessed until a later explicit review workflow.
+Database initialization migrates the existing articles table transactionally, preserves row IDs and article content, and adds the `mul` language value plus confidence/method/review fields. SQLite requires a table migration to update the existing language `CHECK` constraint. A separate additive migration adds `content_validation_status`; existing non-empty body text is retained as `legacy_unverified`, not treated as validated evidence. Analyses and summaries use full body text only when it came from an RSS entry or passed page identity validation. Existing language labels and review history are not overwritten. Back up the database before applying migrations.
 
 ## Data and scope limitations
 

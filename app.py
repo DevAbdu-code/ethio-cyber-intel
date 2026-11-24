@@ -23,7 +23,8 @@ from ethio_cyber_intel.dashboard_data import (  # noqa: E402
 )
 from ethio_cyber_intel.database import (  # noqa: E402
     assess_pending_articles, classify_pending_articles, correlate_pending_articles,
-    initialize_database, insert_live_articles, save_manual_correlation, save_summary_result,
+    detect_legacy_article_languages, initialize_database, insert_live_articles,
+    save_manual_correlation, save_summary_result,
 )
 from ethio_cyber_intel.language_detection import MIN_CONFIDENCE  # noqa: E402
 from ethio_cyber_intel.rss_collector import collect_all  # noqa: E402
@@ -168,12 +169,14 @@ def _relationship_graph(correlations: pd.DataFrame) -> None:
 def _render_correlations(correlations: pd.DataFrame, db_path: Path) -> None:
     st.subheader("Related reports: cross-language correlation")
     if correlations.empty:
+        cols = st.columns(4)
+        for col, label in zip(cols, ("Candidate relationships", "Human confirmed", "Human rejected", "Insufficient evidence")):
+            col.metric(label, 0)
         st.info("No candidate or reviewed relationships are stored. Run correlation to compare collected reports.")
         return
-    metric_cols = st.columns(3)
-    metric_cols[0].metric("Candidate relationships", int((correlations["status"] == "Candidate").sum()))
-    metric_cols[1].metric("Human confirmed", int((correlations["status"] == "Human confirmed").sum()))
-    metric_cols[2].metric("Human rejected", int((correlations["status"] == "Human rejected").sum()))
+    metric_cols = st.columns(4)
+    for col, status in zip(metric_cols, ("Candidate", "Human confirmed", "Human rejected", "Insufficient evidence")):
+        col.metric(status if status != "Candidate" else "Candidate relationships", int((correlations["status"] == status).sum()))
 
     pairs = ["All language pairs"] + sorted(correlations["language_pair"].dropna().unique().tolist())
     selected_pair = st.selectbox("Correlation language pair", pairs)
@@ -245,6 +248,8 @@ def _render_summary_workspace(articles: pd.DataFrame, labels: pd.DataFrame, db_p
     st.caption("Original-language extractive summaries retain source sentences. Cross-language translation is not available in this baseline.")
     if int(selected_row["is_demo"]):
         st.warning("DEMO DATA: this source is synthetic and not a real intelligence report.")
+    if selected_row.get("content_validation_status") == "legacy_unverified":
+        st.warning("Stored full text is legacy and unverified. The summary workspace will use the source title and RSS description instead.")
     if st.button("Generate extractive summary", key="generate_summary"):
         try:
             detail = load_article_detail(int(selected_id), db_path)
@@ -365,6 +370,20 @@ def main() -> None:
             logger.exception("Could not reload reports after collection")
             st.error(f"Reports were collected but could not be reloaded: {exc}")
 
+    if st.button("🔤 Detect language for legacy reports"):
+        try:
+            with st.spinner("Detecting language from each report's title and RSS description…"):
+                counts = detect_legacy_article_languages(db_path)
+            st.success(
+                f"Language detection checked {counts['scanned']} untouched legacy LIVE reports; "
+                f"updated {counts['updated']}, still unknown {counts['unknown']}. "
+                "Human-reviewed labels were preserved."
+            )
+            articles = load_articles(db_path)
+        except Exception as exc:
+            logger.exception("Legacy language detection failed")
+            st.error(f"Could not detect language for legacy reports: {exc}")
+
     if st.button("🏷️ Classify pending reports"):
         try:
             with st.spinner("Applying transparent keyword rules…"):
@@ -428,13 +447,39 @@ def main() -> None:
     total.metric("Total reports", len(articles))
     live_metric.metric("Live collected", live_count)
     demo_metric.metric("Demo records", demo_count)
-    unknown_classifications = int((
-        articles["classification_status"].isin(["unknown", "unclassified"])
-        | articles["classification_categories"].eq(THREAT_NAMES["unknown"])
-    ).sum()) if not articles.empty else 0
-    st.metric("Unknown or unclassified reports", unknown_classifications)
-    unknown_severity = int((articles["severity"] == "Unknown").sum()) if not articles.empty else 0
-    st.metric("Unknown severity", unknown_severity)
+    st.subheader("Processing status")
+    if articles.empty:
+        st.info("No reports are available for processing.")
+    else:
+        language_pending = int((
+            articles["language_method"].isna() & (articles["language_reviewed"] == 0)
+        ).sum())
+        language_unknown = int((
+            (articles["language"] == "und") & articles["language_method"].notna()
+        ).sum())
+        language_reviewed = int((articles["language_reviewed"] == 1).sum())
+        status_cols = st.columns(3)
+        status_cols[0].metric("Language not assessed", language_pending)
+        status_cols[1].metric("Language assessed as unknown", language_unknown)
+        status_cols[2].metric("Human-reviewed language labels", language_reviewed)
+
+        legacy_content = int((articles["content_validation_status"] == "legacy_unverified").sum())
+        st.metric("Legacy article text not validated", legacy_content)
+
+        status_cols = st.columns(4)
+        status_cols[0].metric("Automated classified", int((articles["classification_status"] == "classified").sum()))
+        status_cols[1].metric("Human-reviewed classifications", int((articles["classification_status"] == "human_reviewed").sum()))
+        status_cols[2].metric("Unknown classification", int((
+            (articles["classification_status"] == "unknown")
+            | (articles["classification_categories"] == THREAT_NAMES["unknown"])
+        ).sum()))
+        status_cols[3].metric("Not classified", int((articles["classification_status"] == "unclassified").sum()))
+
+        severity_assessed = articles["severity_status"] != "unassessed"
+        status_cols = st.columns(3)
+        status_cols[0].metric("Severity assessed", int(severity_assessed.sum()))
+        status_cols[1].metric("Severity not assessed", int((~severity_assessed).sum()))
+        status_cols[2].metric("Assessed severity unknown", int(((articles["severity"] == "Unknown") & severity_assessed).sum()))
 
     _render_correlations(correlation_rows, db_path)
 
@@ -598,6 +643,7 @@ def main() -> None:
         live_display = live_display.rename(columns={
             "title": "Title", "source": "Source", "published_at": "Published",
             "language": "Language", "report_status": "Report status", "url": "Original URL",
+            "content_validation_status": "Article text status",
             "fetched_at": "Collected at", "summary": "Description",
             "confidence_display": "Confidence", "method_display": "Detection method",
             "classification_categories": "Threat categories", "classification_confidence": "Category confidence (heuristic)",
@@ -607,7 +653,7 @@ def main() -> None:
             "severity_explanation": "Severity explanation", "severity_evidence": "Severity supporting evidence",
             "severity_method": "Severity method", "evidence_completeness": "Evidence completeness",
         })
-        st.dataframe(live_display[["Title", "Source", "Published", "Collected at", "Language", "Confidence", "Detection method", "Threat categories", "Category confidence (heuristic)", "Supporting evidence", "Classification method", "Classification status", "Severity", "Severity assessment status", "Severity explanation", "Severity supporting evidence", "Severity method", "Evidence completeness", "Report status", "Description", "Original URL"]], use_container_width=True, hide_index=True)
+        st.dataframe(live_display[["Title", "Source", "Published", "Collected at", "Language", "Confidence", "Detection method", "Article text status", "Threat categories", "Category confidence (heuristic)", "Supporting evidence", "Classification method", "Classification status", "Severity", "Severity assessment status", "Severity explanation", "Severity supporting evidence", "Severity method", "Evidence completeness", "Report status", "Description", "Original URL"]], use_container_width=True, hide_index=True)
 
     demo = filtered[filtered["is_demo"] == 1] if not filtered.empty else filtered
     if not demo.empty:
