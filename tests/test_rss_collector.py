@@ -13,7 +13,7 @@ import requests
 
 from src.ethio_cyber_intel.article_extractor import clean_html
 from src.ethio_cyber_intel.database import initialize_database, insert_live_articles
-from src.ethio_cyber_intel.rss_collector import collect_source, normalize_entry
+from src.ethio_cyber_intel.rss_collector import _published, collect_source, normalize_entry
 from src.ethio_cyber_intel.rss_sources import FeedSource
 
 
@@ -87,6 +87,13 @@ class RSSCollectorTests(unittest.TestCase):
         normalized = normalize_entry(item, source())
         self.assertIsNone(normalized["published_at"])
 
+    def test_unrepresentable_parsed_publication_date_is_preserved_as_none(self):
+        self.assertIsNone(_published({"published_parsed": (2025, 13, 1, 0, 0, 0, 0, 1, 0)}))
+
+    def test_article_url_with_embedded_credentials_is_rejected(self):
+        item = {"title": "Credential-bearing URL", "link": "https://user:pass@news.example.test/report"}
+        self.assertIsNone(normalize_entry(item, source()))
+
     def test_feed_response_parses_entries(self):
         session = Mock()
         session.get.return_value.content = FEED_XML
@@ -95,6 +102,21 @@ class RSSCollectorTests(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["entries_seen"], 1)
         self.assertEqual(len(result["articles"]), 1)
+
+    def test_malformed_item_is_skipped_without_dropping_later_entries(self):
+        feed = b"""<rss version='2.0'><channel><title>Test</title>
+        <item><title>Missing link</title></item>
+        <item><title>Valid security report</title><link>https://news.example.test/valid</link>
+        <description>A public security report describing a network issue.</description></item>
+        </channel></rss>"""
+        session = Mock()
+        session.get.return_value.content = feed
+        session.get.return_value.raise_for_status.return_value = None
+        result = collect_source(source(), session=session)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["entries_seen"], 2)
+        self.assertEqual(len(result["articles"]), 1)
+        self.assertIn("skipped 1 malformed", result["message"])
 
     def test_invalid_feed_is_reported_without_raising(self):
         session = Mock()
@@ -110,6 +132,45 @@ class RSSCollectorTests(unittest.TestCase):
         result = collect_source(source(), session=session)
         self.assertEqual(result["status"], "error")
         self.assertEqual(result["message"], "Request timed out")
+
+    def test_unsafe_feed_url_is_rejected_before_network_request(self):
+        session = Mock()
+        result = collect_source(source(url="http://127.0.0.1/feed"), session=session)
+        self.assertEqual(result["status"], "invalid")
+        session.get.assert_not_called()
+
+    def test_feed_redirect_is_revalidated_before_following(self):
+        session = Mock()
+        redirect = Mock(status_code=302, headers={"Location": "https://cdn.example.test/feed"})
+        final = Mock(status_code=200, headers={}, content=FEED_XML)
+        final.raise_for_status.return_value = None
+        session.get.side_effect = [redirect, final]
+        result = collect_source(source(), session=session)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(session.get.call_count, 2)
+        self.assertTrue(all(call.kwargs["allow_redirects"] is False for call in session.get.call_args_list))
+
+    def test_feed_redirect_to_private_target_is_rejected(self):
+        session = Mock()
+        session.get.return_value = Mock(status_code=302, headers={"Location": "https://127.0.0.1/internal"})
+        result = collect_source(source(), session=session)
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(session.get.call_count, 1)
+
+    def test_collect_all_continues_after_one_feed_failure(self):
+        from src.ethio_cyber_intel.rss_collector import collect_all
+
+        session = Mock()
+        okay_response = Mock()
+        okay_response.content = FEED_XML
+        okay_response.raise_for_status.return_value = None
+        session.get.side_effect = [requests.Timeout("temporary network failure"), okay_response]
+        results = collect_all([
+            source(name="Unavailable"),
+            source(name="Available", url="https://news.example.test/feed2"),
+        ], session=session)
+        self.assertEqual([item["status"] for item in results], ["error", "ok"])
+        self.assertEqual(len(results[1]["articles"]), 1)
 
     def test_database_inserts_live_rows_and_detects_url_and_fingerprint_duplicates(self):
         with tempfile.TemporaryDirectory() as temporary:

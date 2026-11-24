@@ -18,6 +18,7 @@
 
 - Cross-language correlation depends on shared identifiers or explicitly labeled entities; it does not provide multilingual semantic understanding. It identifies candidates, not same incidents or attribution.
 - Pairwise correlation is quadratic; the 40-record benchmark required 6.686 seconds for 780 pairs on the recorded environment. Larger collections need indexing/candidate generation.
+- Stage 10 reduces repeated signal extraction and candidate write transactions. A matched synthetic in-memory benchmark recorded about 7.0×–8.4× faster candidate generation at 40–300 reports with identical candidate counts; pairwise comparison remains quadratic and results do not establish production throughput.
 - Summaries are source-language extractive selections. There is no translation or abstractive generation. Key intelligence phrase extraction (impact/exploitation) is English-focused. No eligible source-language-labeled records existed for a real-data summary benchmark.
 - No human-rated summary examples exist; factuality, coverage, readability, usefulness, and language correctness are unmeasured.
 

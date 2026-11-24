@@ -739,6 +739,64 @@ def save_correlation(result, db_path: str | Path | None = None) -> dict[str, int
         raise
 
 
+def _save_candidate_in_connection(connection: sqlite3.Connection, value: dict) -> dict[str, int | bool | str]:
+    """Persist one candidate while a caller-owned transaction is active."""
+    if value.get("status") not in {"Candidate", "Insufficient evidence"}:
+        raise ValueError("Automated correlation status must be Candidate or Insufficient evidence")
+    article_a, article_b = value.get("article_id_a"), value.get("article_id_b")
+    if article_a is None or article_b is None or int(article_a) == int(article_b):
+        raise ValueError("Correlation requires two distinct persisted article IDs")
+    first, second = sorted((int(article_a), int(article_b)))
+    pair = connection.execute(
+        "SELECT id FROM correlation_pairs WHERE article_id_a=? AND article_id_b=?", (first, second)
+    ).fetchone()
+    if pair is None:
+        pair_id = int(connection.execute(
+            "INSERT INTO correlation_pairs (article_id_a,article_id_b,created_at) VALUES (?,?,?)",
+            (first, second, value["correlated_at"]),
+        ).lastrowid)
+    else:
+        pair_id = int(pair["id"])
+    latest = connection.execute(
+        "SELECT status FROM correlation_assessments WHERE pair_id=? ORDER BY id DESC LIMIT 1", (pair_id,)
+    ).fetchone()
+    if latest and latest["status"] in {"Human confirmed", "Human rejected"}:
+        return {"saved": False, "reason": "human_review_preserved", "pair_id": pair_id}
+    if latest and latest["status"] == value["status"] == "Candidate":
+        return {"saved": False, "reason": "candidate_already_recorded", "pair_id": pair_id}
+    cursor = connection.execute(
+        """INSERT INTO correlation_assessments
+           (pair_id,score,matching_identifiers_json,shared_entities_json,shared_terms_json,
+            similarity_methods_json,supporting_evidence_json,language_a,language_b,language_pair,
+            explanation,correlated_at,status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (pair_id, value["score"], json.dumps(value.get("matching_identifiers", []), ensure_ascii=False),
+         json.dumps(value.get("shared_entities", []), ensure_ascii=False),
+         json.dumps(value.get("shared_terms", []), ensure_ascii=False),
+         json.dumps(value.get("similarity_methods", []), ensure_ascii=False),
+         json.dumps(value.get("supporting_evidence", []), ensure_ascii=False),
+         value["language_a"], value["language_b"], value["language_pair"],
+         value["explanation"], value["correlated_at"], value["status"]),
+    )
+    return {"saved": True, "assessment_id": int(cursor.lastrowid), "pair_id": pair_id}
+
+
+def save_correlation_batch(results: Iterable, db_path: str | Path | None = None) -> dict[str, int]:
+    """Write candidate results in one transaction and one SQLite connection."""
+    saved = skipped = 0
+    try:
+        with connect(db_path) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            for result in results:
+                value = result.as_dict() if hasattr(result, "as_dict") else dict(result)
+                outcome = _save_candidate_in_connection(connection, value)
+                saved += int(bool(outcome.get("saved")))
+                skipped += int(not outcome.get("saved"))
+        return {"saved": saved, "skipped": skipped}
+    except sqlite3.Error:
+        logger.exception("Could not persist correlation result batch")
+        raise
+
+
 def save_manual_correlation(
     article_id_a: int, article_id_b: int, *, decision: str, reviewer_note: str = "",
     db_path: str | Path | None = None,
@@ -798,7 +856,7 @@ def correlate_pending_articles(
     db_path: str | Path | None = None, *, article_limit: int = 300,
 ) -> dict[str, int]:
     """Compare a bounded recent article set; persist candidates only."""
-    from .correlation import correlate_pair
+    from .correlation import _correlate_pair_with_signals, extract_signals
 
     try:
         with connect(db_path) as connection:
@@ -810,20 +868,26 @@ def correlate_pending_articles(
                    ORDER BY COALESCE(published_at,fetched_at) DESC,id DESC LIMIT ?""",
                 (article_limit,),
             ).fetchall()]
+        # Prepare text-derived signals once per article. The candidate rules and
+        # thresholds are unchanged; this avoids repeating regex/token/gram work
+        # for every pair in the bounded all-pairs comparison.
+        article_signals = [extract_signals(article) for article in articles]
         counts = {"compared": 0, "candidates": 0, "insufficient": 0, "saved": 0, "skipped": 0}
+        candidate_results = []
         for left_index, article_a in enumerate(articles):
-            for article_b in articles[left_index + 1:]:
+            for right_index in range(left_index + 1, len(articles)):
+                article_b = articles[right_index]
                 counts["compared"] += 1
-                result = correlate_pair(article_a, article_b)
+                result = _correlate_pair_with_signals(
+                    article_a, article_b, article_signals[left_index], article_signals[right_index]
+                )
                 if result.status != "Candidate":
                     counts["insufficient"] += 1
                     continue
                 counts["candidates"] += 1
-                saved = save_correlation(result, db_path)
-                if saved.get("saved"):
-                    counts["saved"] += 1
-                else:
-                    counts["skipped"] += 1
+                candidate_results.append(result)
+        if candidate_results:
+            counts.update(save_correlation_batch(candidate_results, db_path))
         return counts
     except sqlite3.Error:
         logger.exception("Could not correlate article pairs")

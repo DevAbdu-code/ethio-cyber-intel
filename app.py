@@ -19,7 +19,7 @@ from ethio_cyber_intel.article_extractor import ArticleExtractor  # noqa: E402
 from ethio_cyber_intel.config import seed_demo_enabled  # noqa: E402
 from ethio_cyber_intel.dashboard_data import (  # noqa: E402
     load_article_detail, load_articles, load_current_classifications,
-    load_current_correlations, load_current_severity_assessments, load_summary_history,
+    load_current_correlations, load_current_severity_assessments, load_current_summaries, load_summary_history,
 )
 from ethio_cyber_intel.database import (  # noqa: E402
     assess_pending_articles, classify_pending_articles, correlate_pending_articles,
@@ -32,6 +32,7 @@ from ethio_cyber_intel.rss_sources import load_sources  # noqa: E402
 from ethio_cyber_intel.summarization import (  # noqa: E402
     SUPPORTED_SUMMARY_LANGUAGES, summarize_article,
 )
+from ethio_cyber_intel.url_safety import is_public_web_url  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -62,11 +63,11 @@ def _attach_classifications(articles: pd.DataFrame, labels: pd.DataFrame) -> pd.
     if labels.empty:
         return result
     import json
+    row_by_id = {int(article_id): index for index, article_id in result["id"].items()}
     for article_id, group in labels.groupby("article_id"):
-        indices = result.index[result["id"] == article_id]
-        if len(indices) == 0:
+        idx = row_by_id.get(int(article_id))
+        if idx is None:
             continue
-        idx = indices[0]
         categories = group["category"].tolist()
         result.at[idx, "classification_categories"] = ", ".join(
             THREAT_NAMES.get(category, category) for category in categories
@@ -102,11 +103,11 @@ def _attach_severities(articles: pd.DataFrame, assessments: pd.DataFrame) -> pd.
     if assessments.empty:
         return result
     import json
+    row_by_id = {int(article_id): index for index, article_id in result["id"].items()}
     for _, row in assessments.iterrows():
-        indices = result.index[result["id"] == row["article_id"]]
-        if len(indices) == 0:
+        idx = row_by_id.get(int(row["article_id"]))
+        if idx is None:
             continue
-        idx = indices[0]
         result.at[idx, "severity"] = row["severity"]
         result.at[idx, "severity_explanation"] = row["explanation"]
         result.at[idx, "severity_method"] = row["method"]
@@ -126,6 +127,26 @@ def _attach_severities(articles: pd.DataFrame, assessments: pd.DataFrame) -> pd.
             f"{completeness.get('known_fields', 0)}/{completeness.get('total_fields', 0)} factors; "
             f"missing: {', '.join(missing) if missing else 'none'}"
         )
+    return result
+
+
+def _attach_summary_statuses(articles: pd.DataFrame, summaries: pd.DataFrame) -> pd.DataFrame:
+    result = articles.copy()
+    if result.empty:
+        return result
+    result["summary_status"] = "not_generated"
+    result["summary_method"] = "Not generated"
+    result["summary_language"] = None
+    if summaries.empty:
+        return result
+    row_by_id = {int(article_id): index for index, article_id in result["id"].items()}
+    for _, row in summaries.iterrows():
+        idx = row_by_id.get(int(row["article_id"]))
+        if idx is None:
+            continue
+        result.at[idx, "summary_status"] = row["summary_status"]
+        result.at[idx, "summary_method"] = row["summary_method"]
+        result.at[idx, "summary_language"] = row["summary_language"]
     return result
 
 
@@ -166,6 +187,10 @@ def _relationship_graph(correlations: pd.DataFrame) -> None:
     st.plotly_chart(figure, use_container_width=True)
 
 
+def _safe_external_url(value: str) -> bool:
+    return is_public_web_url(str(value))
+
+
 def _render_correlations(correlations: pd.DataFrame, db_path: Path) -> None:
     st.subheader("Related reports: cross-language correlation")
     if correlations.empty:
@@ -199,17 +224,25 @@ def _render_correlations(correlations: pd.DataFrame, db_path: Path) -> None:
     for _, row in visible.iterrows():
         label = f"{row['status']} · {row['language_pair']} · score {row['score']:.2f} · reports {row['article_id_a']} / {row['article_id_b']}"
         with st.expander(label):
-            st.write(f"**{row['title_a']}** — {row['source_a']} · {row['published_a'] or 'Date unknown'} · [{row['url_a']}]({row['url_a']})")
-            st.write(f"**{row['title_b']}** — {row['source_b']} · {row['published_b'] or 'Date unknown'} · [{row['url_b']}]({row['url_b']})")
-            st.write(row["explanation"])
-            st.write(f"Similarity methods: {', '.join(json.loads(row['similarity_methods_json'])) or 'none'}")
-            st.write(f"Shared identifiers: {json.loads(row['matching_identifiers_json']) or 'None'}")
-            st.write(f"Shared entities: {json.loads(row['shared_entities_json']) or 'None'}")
-            st.write(f"Shared terms: {', '.join(json.loads(row['shared_terms_json'])) or 'None'}")
+            st.text(f"Report A: {row['title_a']} — {row['source_a']} · {row['published_a'] or 'Date unknown'}")
+            if _safe_external_url(row["url_a"]):
+                st.link_button("Open original report A", row["url_a"])
+            else:
+                st.text(f"Original URL: {row['url_a']}")
+            st.text(f"Report B: {row['title_b']} — {row['source_b']} · {row['published_b'] or 'Date unknown'}")
+            if _safe_external_url(row["url_b"]):
+                st.link_button("Open original report B", row["url_b"])
+            else:
+                st.text(f"Original URL: {row['url_b']}")
+            st.text(row["explanation"])
+            st.text(f"Similarity methods: {', '.join(json.loads(row['similarity_methods_json'])) or 'none'}")
+            st.text(f"Shared identifiers: {json.loads(row['matching_identifiers_json']) or 'None'}")
+            st.text(f"Shared entities: {json.loads(row['shared_entities_json']) or 'None'}")
+            st.text(f"Shared terms: {', '.join(json.loads(row['shared_terms_json'])) or 'None'}")
             with st.expander("Supporting evidence"):
                 st.json(json.loads(row["supporting_evidence_json"]))
             if row["reviewer_note"]:
-                st.write(f"Reviewer note: {row['reviewer_note']}")
+                st.text(f"Reviewer note: {row['reviewer_note']}")
             if row["status"] == "Candidate":
                 note = st.text_input("Review note", key=f"correlation_note_{row['pair_id']}")
                 confirm_col, reject_col = st.columns(2)
@@ -262,6 +295,8 @@ def _render_summary_workspace(articles: pd.DataFrame, labels: pd.DataFrame, db_p
             st.session_state["summary_generation_message"] = (
                 int(selected_id), language, result.status, saved
             )
+            if saved.get("saved"):
+                st.rerun()
         except Exception as exc:
             logger.exception("Summary generation failed for article %s", selected_id)
             st.error(f"Could not create summary: {exc}")
@@ -314,20 +349,29 @@ def _refresh(db_path: Path) -> None:
         st.session_state["source_results"] = []
         st.error("No enabled RSS sources are configured. Check config/rss_sources.json.")
         return
+    st.session_state["source_results"] = []
     with st.spinner(f"Checking {len(sources)} RSS sources…"):
+        extractor = ArticleExtractor()
         try:
-            results = collect_all(sources, extractor=ArticleExtractor())
+            results = collect_all(sources, extractor=extractor)
+            # Keep per-source outcomes visible even when later persistence or
+            # analysis work fails.
+            st.session_state["source_results"] = results
             all_articles = [article for result in results for article in result["articles"]]
             stats = insert_live_articles(all_articles, db_path)
             classification_stats = classify_pending_articles(db_path)
             severity_stats = assess_pending_articles(db_path)
             st.session_state["source_results"] = results
             st.session_state["last_collection_stats"] = stats
-            st.success(
-                f"Refresh finished: added {stats['inserted']} live articles; "
-                f"skipped {stats['duplicate_url']} duplicate URLs and "
-                f"{stats['duplicate_content']} duplicate-content records."
-            )
+            successful_sources = sum(result["status"] in {"ok", "ok_with_warning"} for result in results)
+            if successful_sources:
+                st.success(
+                    f"Refresh finished: {successful_sources}/{len(results)} sources returned feeds; "
+                    f"added {stats['inserted']} LIVE articles; skipped {stats['duplicate_url']} duplicate URLs and "
+                    f"{stats['duplicate_content']} duplicate-content records."
+                )
+            else:
+                st.warning("No RSS source returned a usable feed. Existing reports were left intact.")
             st.info(
                 f"Preliminary keyword classification: {classification_stats['classified']} labeled, "
                 f"{classification_stats['unknown']} unknown. These labels are not human verified."
@@ -336,9 +380,11 @@ def _refresh(db_path: Path) -> None:
                 f"Preliminary severity assessment: {severity_stats['assessed']} prioritized, "
                 f"{severity_stats['unknown']} unknown."
             )
-        except Exception as exc:
+        except Exception:
             logger.exception("RSS refresh failed")
-            st.error(f"Could not save collected reports: {exc}")
+            st.error("Collection or processing did not complete. Check the RSS status table and application logs.")
+        finally:
+            extractor.close()
 
 
 def main() -> None:
@@ -351,6 +397,7 @@ def main() -> None:
         articles = load_articles(db_path)
         labels = load_current_classifications(db_path)
         severity_rows = load_current_severity_assessments(db_path)
+        summary_rows = load_current_summaries(db_path)
         correlation_rows = load_current_correlations(db_path)
     except Exception as exc:
         logger.exception("Dashboard could not load the local database")
@@ -366,6 +413,7 @@ def main() -> None:
             articles = load_articles(db_path)
             labels = load_current_classifications(db_path)
             severity_rows = load_current_severity_assessments(db_path)
+            summary_rows = load_current_summaries(db_path)
         except Exception as exc:
             logger.exception("Could not reload reports after collection")
             st.error(f"Reports were collected but could not be reloaded: {exc}")
@@ -421,6 +469,7 @@ def main() -> None:
 
     articles = _attach_classifications(articles, labels)
     articles = _attach_severities(articles, severity_rows)
+    articles = _attach_summary_statuses(articles, summary_rows)
 
     if st.session_state.get("source_results") is not None:
         rows = []
@@ -448,14 +497,17 @@ def main() -> None:
     live_metric.metric("Live collected", live_count)
     demo_metric.metric("Demo records", demo_count)
     st.subheader("Processing status")
+    st.caption("Counts include both record types; synthetic DEMO DATA remains visibly separated from LIVE reports below.")
     if articles.empty:
         st.info("No reports are available for processing.")
     else:
         language_pending = int((
-            articles["language_method"].isna() & (articles["language_reviewed"] == 0)
+            (articles["language_method"].isna() | (articles["language_method"] == "not_detected"))
+            & (articles["language_reviewed"] == 0)
         ).sum())
         language_unknown = int((
             (articles["language"] == "und") & articles["language_method"].notna()
+            & (articles["language_method"] != "not_detected")
         ).sum())
         language_reviewed = int((articles["language_reviewed"] == 1).sum())
         status_cols = st.columns(3)
@@ -480,6 +532,12 @@ def main() -> None:
         status_cols[0].metric("Severity assessed", int(severity_assessed.sum()))
         status_cols[1].metric("Severity not assessed", int((~severity_assessed).sum()))
         status_cols[2].metric("Assessed severity unknown", int(((articles["severity"] == "Unknown") & severity_assessed).sum()))
+
+        summaries_created = articles["summary_status"].isin(["original_extractive", "human_reviewed"])
+        summary_cols = st.columns(3)
+        summary_cols[0].metric("Summary created", int(summaries_created.sum()))
+        summary_cols[1].metric("Summary unavailable", int((~summaries_created & (articles["summary_status"] != "not_generated")).sum()))
+        summary_cols[2].metric("Summary not generated", int((articles["summary_status"] == "not_generated").sum()))
 
     _render_correlations(correlation_rows, db_path)
 
@@ -652,8 +710,9 @@ def main() -> None:
             "severity": "Severity", "severity_status": "Severity assessment status",
             "severity_explanation": "Severity explanation", "severity_evidence": "Severity supporting evidence",
             "severity_method": "Severity method", "evidence_completeness": "Evidence completeness",
+            "summary_status": "Summary status",
         })
-        st.dataframe(live_display[["Title", "Source", "Published", "Collected at", "Language", "Confidence", "Detection method", "Article text status", "Threat categories", "Category confidence (heuristic)", "Supporting evidence", "Classification method", "Classification status", "Severity", "Severity assessment status", "Severity explanation", "Severity supporting evidence", "Severity method", "Evidence completeness", "Report status", "Description", "Original URL"]], use_container_width=True, hide_index=True)
+        st.dataframe(live_display[["Title", "Source", "Published", "Collected at", "Language", "Confidence", "Detection method", "Article text status", "Threat categories", "Category confidence (heuristic)", "Supporting evidence", "Classification method", "Classification status", "Severity", "Severity assessment status", "Severity explanation", "Severity supporting evidence", "Severity method", "Evidence completeness", "Summary status", "Report status", "Description", "Original URL"]], use_container_width=True, hide_index=True)
 
     demo = filtered[filtered["is_demo"] == 1] if not filtered.empty else filtered
     if not demo.empty:
@@ -668,9 +727,10 @@ def main() -> None:
             "severity": "Severity", "severity_status": "Severity assessment status",
             "severity_explanation": "Severity explanation", "severity_evidence": "Severity supporting evidence",
             "severity_method": "Severity method", "evidence_completeness": "Evidence completeness",
+            "summary_status": "Summary status",
         })
         demo_display["Language"] = demo_display["Language"].map(LANGUAGE_NAMES)
-        st.dataframe(demo_display[["Title", "Source", "Published", "Language", "Confidence", "Detection method", "Threat categories", "Category confidence (heuristic)", "Supporting evidence", "Classification method", "Classification status", "Severity", "Severity assessment status", "Severity explanation", "Severity supporting evidence", "Severity method", "Evidence completeness", "Original URL"]], use_container_width=True, hide_index=True)
+        st.dataframe(demo_display[["Title", "Source", "Published", "Language", "Confidence", "Detection method", "Threat categories", "Category confidence (heuristic)", "Supporting evidence", "Classification method", "Classification status", "Severity", "Severity assessment status", "Severity explanation", "Severity supporting evidence", "Severity method", "Evidence completeness", "Summary status", "Original URL"]], use_container_width=True, hide_index=True)
 
     _render_summary_workspace(articles, labels, db_path)
 

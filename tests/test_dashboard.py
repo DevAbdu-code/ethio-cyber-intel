@@ -15,6 +15,7 @@ def test_dashboard_renders_language_summary_without_exception(tmp_path, monkeypa
     assert any("Language not assessed" == metric.label for metric in result.metric)
     assert any("Not classified" == metric.label for metric in result.metric)
     assert any("Severity not assessed" == metric.label for metric in result.metric)
+    assert any("Summary not generated" == metric.label for metric in result.metric)
     assert any("Threat category distribution" in item.value for item in result.subheader)
     assert any("Detect language for legacy reports" in button.label for button in result.button)
     assert any("Classify pending reports" in button.label for button in result.button)
@@ -119,3 +120,4 @@ def test_dashboard_summary_workspace_generates_and_displays_history(tmp_path, mo
     result = action.click().run()
     assert not result.exception
     assert any("original_extractive" in expander.label for expander in result.expander)
+    assert any(metric.label == "Summary created" and metric.value == "1" for metric in result.metric)

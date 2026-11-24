@@ -64,6 +64,16 @@ def test_non_https_or_cross_host_pages_are_not_requested():
     session.get.assert_not_called()
 
 
+def test_private_literal_article_hosts_are_rejected():
+    session = Mock()
+    extractor = ArticleExtractor(session=session)
+    assert extractor.extract(
+        "https://127.0.0.1/report", allowed_hostname="127.0.0.1",
+        expected_title="A report", delay_seconds=0,
+    ) is None
+    session.get.assert_not_called()
+
+
 def test_extractor_uses_article_body_not_first_recommendation_card():
     html = f"""<!doctype html><html><head>
       <link rel="canonical" href="{ARTICLE_URL}">
@@ -136,7 +146,21 @@ def test_normalization_keeps_rss_provenance_when_page_identity_fails():
     assert article["published_at"] == "2026-11-24T12:02:00Z"
     assert article["summary"] == description
     assert article["content"] is None
-    assert article["content_validation_status"] == "not_available"
+    assert article["content_validation_status"] == "extraction_rejected"
+
+
+def test_unexpected_page_extraction_error_preserves_rss_fallback():
+    class FailingExtractor:
+        def extract(self, *args, **kwargs):
+            raise RuntimeError("simulated extractor failure")
+
+    article = normalize_entry({
+        "title": EXPECTED_TITLE, "summary": "Publisher supplied RSS fallback description.",
+        "link": ARTICLE_URL,
+    }, source(), extractor=FailingExtractor())
+    assert article["summary"] == "Publisher supplied RSS fallback description."
+    assert article["content"] is None
+    assert article["content_validation_status"] == "extraction_rejected"
 
 
 def test_extraction_rejects_canonical_url_for_another_article():

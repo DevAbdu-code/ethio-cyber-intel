@@ -6,7 +6,7 @@ import calendar
 import logging
 from datetime import datetime, timezone
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import feedparser
 import requests
@@ -15,8 +15,45 @@ from .article_extractor import ArticleExtractor, USER_AGENT, clean_html
 from .config import request_timeout
 from .language_detection import detect_article_language
 from .rss_sources import FeedSource
+from .url_safety import is_public_https_url
 
 logger = logging.getLogger(__name__)
+_REDIRECT_CODES = {301, 302, 303, 307, 308}
+_MAX_FEED_REDIRECTS = 5
+
+
+def _get_feed_response(http, url: str, timeout: float):
+    """Follow a small number of redirects, revalidating every destination."""
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml",
+    }
+    current_url = url
+    for redirect_count in range(_MAX_FEED_REDIRECTS + 1):
+        response = http.get(current_url, headers=headers, timeout=timeout, allow_redirects=False)
+        status = getattr(response, "status_code", 200)
+        # Lightweight test doubles may omit an HTTP status. Real requests
+        # responses always provide an integer status code.
+        if not isinstance(status, int):
+            response.raise_for_status()
+            return response
+        if status in _REDIRECT_CODES:
+            location = getattr(response, "headers", {}).get("Location")
+            target = urljoin(current_url, location or "")
+            if redirect_count >= _MAX_FEED_REDIRECTS:
+                raise requests.TooManyRedirects("RSS feed exceeded redirect limit")
+            if not location or not is_public_https_url(target):
+                raise requests.RequestException("RSS redirect target is not an allowed public HTTPS URL")
+            close_response = getattr(response, "close", None)
+            if callable(close_response):
+                close_response()
+            current_url = target
+            continue
+        if 300 <= status < 400:
+            raise requests.RequestException(f"Unexpected RSS HTTP redirect status {status}")
+        response.raise_for_status()
+        return response
+    raise requests.TooManyRedirects("RSS feed exceeded redirect limit")
 
 
 def _published(entry: Any) -> str | None:
@@ -41,7 +78,8 @@ def normalize_entry(
     title = clean_html(entry.get("title"))
     link = str(entry.get("link", "")).strip()
     parsed = urlparse(link)
-    if not title or parsed.scheme not in {"http", "https"} or not parsed.hostname:
+    if (not title or parsed.scheme not in {"http", "https"} or not parsed.hostname
+            or parsed.username or parsed.password):
         return None
     description = clean_html(entry.get("summary") or entry.get("description"))
     content = ""
@@ -52,10 +90,16 @@ def normalize_entry(
             content_validation_status = "rss_feed_entry"
             break
     if not content and extractor:
-        content = extractor.extract(
-            link, allowed_hostname=source.hostname, expected_title=title,
-            delay_seconds=source.delay_seconds,
-        ) or ""
+        try:
+            content = extractor.extract(
+                link, allowed_hostname=source.hostname, expected_title=title,
+                delay_seconds=source.delay_seconds,
+            ) or ""
+            if not content:
+                content_validation_status = "extraction_rejected"
+        except Exception:
+            logger.warning("Optional article extraction failed for %s", link, exc_info=True)
+            content_validation_status = "extraction_rejected"
         if content:
             content_validation_status = "page_identity_verified"
     detection = detect_article_language(
@@ -93,13 +137,14 @@ def collect_source(
     if not source.enabled:
         result.update(status="disabled", message="Source disabled in configuration")
         return result
-    http = session or requests.Session()
+    if not is_public_https_url(source.url):
+        result.update(status="invalid", message="Feed URL must be a public HTTPS endpoint without credentials")
+        logger.warning("Rejected unsafe RSS URL for %s", source.name)
+        return result
+    owns_session = session is None
+    http = session if session is not None else requests.Session()
     try:
-        response = http.get(
-            source.url, headers={"User-Agent": USER_AGENT, "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml"},
-            timeout=timeout or request_timeout(),
-        )
-        response.raise_for_status()
+        response = _get_feed_response(http, source.url, timeout or request_timeout())
         parsed_feed = feedparser.parse(response.content)
     except requests.Timeout:
         result["message"] = "Request timed out"
@@ -113,6 +158,9 @@ def collect_source(
         result["message"] = f"Feed parsing error: {exc}"
         logger.exception("RSS parsing failed for %s", source.name)
         return result
+    finally:
+        if owns_session:
+            http.close()
 
     entries = list(parsed_feed.entries or [])
     result["entries_seen"] = len(entries)
@@ -126,15 +174,22 @@ def collect_source(
         return result
 
     normalized = []
+    skipped = 0
     for entry in entries[: source.max_articles]:
-        article = normalize_entry(entry, source, extractor=extractor)
-        if article:
-            normalized.append(article)
+        try:
+            article = normalize_entry(entry, source, extractor=extractor)
+            if article:
+                normalized.append(article)
+            else:
+                skipped += 1
+        except Exception:
+            skipped += 1
+            logger.warning("Skipping malformed RSS item from %s", source.name, exc_info=True)
     result["articles"] = normalized
     result["status"] = "ok_with_warning" if getattr(parsed_feed, "bozo", False) else "ok"
     result["message"] = f"Parsed {len(normalized)} entries"
-    if len(normalized) < len(entries[: source.max_articles]):
-        result["message"] += f"; skipped {len(entries[: source.max_articles]) - len(normalized)} malformed entries"
+    if skipped:
+        result["message"] += f"; skipped {skipped} malformed entries"
     return result
 
 
@@ -143,13 +198,19 @@ def collect_all(
 ) -> list[dict[str, Any]]:
     """Collect each source independently so one failure never stops the others."""
     results = []
-    for source in sources:
-        try:
-            results.append(collect_source(source, session=session, extractor=extractor))
-        except Exception:
-            logger.exception("Unexpected collection failure for %s", source.name)
-            results.append({
-                "source": source.name, "url": source.url, "status": "error",
-                "message": "Unexpected collection error", "entries_seen": 0, "articles": [],
-            })
-    return results
+    owns_session = session is None
+    http = session if session is not None else requests.Session()
+    try:
+        for source in sources:
+            try:
+                results.append(collect_source(source, session=http, extractor=extractor))
+            except Exception:
+                logger.exception("Unexpected collection failure for %s", source.name)
+                results.append({
+                    "source": source.name, "url": source.url, "status": "error",
+                    "message": "Unexpected collection error", "entries_seen": 0, "articles": [],
+                })
+        return results
+    finally:
+        if owns_session:
+            http.close()

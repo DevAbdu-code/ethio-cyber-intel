@@ -9,6 +9,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from .config import feed_sources_path
+from .url_safety import is_public_https_url
 
 logger = logging.getLogger(__name__)
 
@@ -26,11 +27,6 @@ class FeedSource:
     @property
     def hostname(self) -> str:
         return (urlparse(self.homepage).hostname or "").lower()
-
-
-def _valid_http_url(value: str) -> bool:
-    parsed = urlparse(value)
-    return parsed.scheme in {"http", "https"} and bool(parsed.hostname)
 
 
 def load_sources(path: str | Path | None = None, *, enabled_only: bool = False) -> list[FeedSource]:
@@ -60,8 +56,8 @@ def load_sources(path: str | Path | None = None, *, enabled_only: bool = False) 
                 max_articles=max(1, min(50, int(item.get("max_articles", 10)))),
                 delay_seconds=max(0.0, min(10.0, float(item.get("delay_seconds", 0.5)))),
             )
-            if not source.name or not _valid_http_url(source.url) or not _valid_http_url(source.homepage):
-                raise ValueError("name, HTTP(S) feed URL, and homepage are required")
+            if not source.name or not is_public_https_url(source.url) or not is_public_https_url(source.homepage):
+                raise ValueError("name, public HTTPS feed URL, and homepage are required")
             if enabled_only and not source.enabled:
                 continue
             sources.append(source)

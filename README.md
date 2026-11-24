@@ -1,263 +1,185 @@
 # ETHIO-CYBER INTEL
 
-A CPU-friendly research application for trilingual cyber threat intelligence aggregation and analysis. Stage 1 provides the Streamlit dashboard and SQLite store; Stage 2 adds configurable RSS collection and careful article extraction; Stage 3 adds conservative language detection; Stage 4 adds preliminary, explainable multi-label threat categorization; Stage 5 adds conservative evidence-based severity triage; Stage 6 adds candidate relationship discovery; Stage 7 adds evidence-grounded extractive summaries.
+**Research title:** *Design and Development of a Trilingual AI-Driven Cyber Threat Intelligence Aggregation, Analysis, and Correlation Framework for Amharic, Afaan Oromo, and English.*
 
-Collected reports are source-attributed but are not independently verified advisories. Automated threat labels, severity assessments, and correlation candidates are preliminary unless human reviewed. Their rule scores are not calibrated probabilities. Candidate relationships never prove that reports describe the same incident or share an actor.
+ETHIO-CYBER INTEL is a CPU-friendly research prototype that collects permitted public cybersecurity reports, preserves source provenance, and presents preliminary analysis for English, Amharic, and Afaan Oromo. It combines configurable RSS/Atom collection, conservative article extraction, SQLite histories, lightweight language detection, explainable threat categorization, evidence-based severity triage, cross-language candidate discovery, source-language extractive summaries, and a Streamlit dashboard.
 
-## Stage 8: research evaluation and system validation
+> **Research and trust boundary:** LIVE means collected from a source; it does not mean independently verified. Automated labels and relationship candidates are preliminary. Rule scores are heuristic, not calibrated probabilities. Human review is required before treating results as validated intelligence. The current release is a prototype, not a production-ready service.
 
-Stage 8 records a reproducible evaluation of the completed Stages 1–7 without adding new analysis features. See the [research evaluation report](docs/research_evaluation_report.md), [system validation report](docs/system_validation_report.md), [reproducibility guide](docs/reproducibility.md), [final architecture](docs/final_architecture.md), and [known limitations](docs/known_limitations.md).
+## Research motivation and contribution
 
-Current research evidence is limited: the language evaluation contains 15 researcher-authored synthetic sanity-check examples and scores 100% on that tiny set; it is not a field-performance estimate. Threat classification, severity, correlation, and summary research datasets are empty, so those performance metrics are unavailable. No translation is implemented. On 2026-11-25, the four configured RSS feeds were reachable and parsed by the live collector (40 normalized entries, persistence disabled); future availability still depends on network, DNS, and publisher changes.
+Security reporting is spread across sources and languages, while local-language NLP resources and representative evaluation data are limited. The project provides a modular, auditable workflow that keeps uncertainty and provenance visible instead of silently converting missing evidence into claims. It is an integration and research-evaluation artifact; it does **not** establish superior analytic performance or trilingual parity. See the [final research paper](docs/final_research_paper.md), the [Stage 9 evaluation report](docs/stage9_research_evaluation_report.md), and the [Stage 10 system validation report](docs/system_validation_report.md). The earlier [research evaluation report](docs/research_evaluation_report.md) is a dated Stage 8 record.
 
-The local SQLite file was inspected read-only: integrity check passed, with 43 article rows (3 demo and 40 collected). This snapshot has only the `articles` table, so it contains no stored Stage 4–7 history tables to validate. Automated migration and history behavior is tested using temporary databases.
+## Features
 
-The validation review also fixed robots.txt handling so redirects are not treated as successful rules responses. Run the full verification with:
+- Configurable collection from public RSS/Atom feeds with per-source failure handling, normalization, dates, source attribution, and duplicate prevention.
+- Optional publisher-page extraction constrained by HTTPS, same-host checks, robots policy, rate delay, timeouts, and article identity validation. Ambiguous content is rejected while RSS provenance is retained.
+- Language labels `en`, `am`, `om`, `und`, and `mul`, with method and heuristic confidence.
+- Explainable multi-label threat categories: phishing, malware, ransomware, vulnerability, data breach, DDoS, cyber espionage, credential theft, other, and unknown.
+- Evidence-based severity triage: Critical, High, Medium, Low, Informational, or Unknown. Threat category and severity remain separate.
+- Cross-language candidate relationships with evidence and human review history. Candidate does not mean same incident or shared attribution.
+- Extractive summaries selected from source text, with source excerpts and summary history. Translation and abstractive generation are not implemented.
+- Separate LIVE and synthetic DEMO records, plus processing-state, source, language, category, and severity dashboard views.
+- Offline research evaluation scripts and documented annotation schemas. Empty research datasets remain unavailable, not scored as zero.
 
-```bash
-source .venv/bin/activate
-python -m pytest -v
-python -m compileall -q app.py src tests scripts
-git diff --check
+## Architecture
+
+```text
+Configured RSS/Atom feeds
+  → collection and normalization
+  → URL/content deduplication
+  → optional article extraction and identity validation
+  → language detection
+  → SQLite article/provenance store
+  → threat categorization and severity evidence assessment
+  → cross-language relationship candidates
+  → source-language extractive summaries
+  → Streamlit dashboard and human review
 ```
 
-## Stage 9: research evaluation and intelligence quality assurance
+Detailed component responsibilities and trust boundaries: [Final Architecture](docs/final_architecture.md). Configuration and operations: [Configuration](docs/configuration.md), [Installation](docs/installation.md), and [Troubleshooting](docs/troubleshooting.md).
 
-Stage 9 adds deterministic, dependency-free evaluators for language detection, multi-label threat classification, evidence-based severity, candidate correlation, article extraction, and extractive summaries. Run all reports with `python scripts/run_research_evaluation.py`; use `--output /tmp/report.json` to save the unified JSON report. The scripts do not access or modify SQLite and do not make network requests.
+## Technology stack
 
-Synthetic records are reported separately and never contribute to research metrics. Every real research row must include stable identity, source URL/provenance, reviewer decision, review date, dataset version, and `synthetic: false`. Empty or missing reviewed datasets produce unavailable (`null`) metrics, not fabricated zeros. The existing language file has 15 synthetic sanity-check examples; the other research datasets remain empty, and extraction review data is also empty. Thus real-world performance metrics are currently unavailable. Templates and guidance are in [`evaluation/templates`](evaluation/templates) and [Stage 9 methodology](docs/stage9_evaluation_methodology.md), [annotation guidelines](docs/stage9_annotation_guidelines.md), [results template](docs/stage9_results_template.md), and [limitations](docs/stage9_limitations_and_validity.md).
+Python, Streamlit, SQLite, Pandas, Plotly, Feedparser, Requests, BeautifulSoup, and Pytest. No GPU/CUDA dependency, paid API, or large model download is required. The current analytics are deterministic heuristic baselines and do not use a trained ML classifier or LLM.
 
-Threat `unknown` is handled as a separate abstention outcome, not a threat category. Severity `Unknown` remains a valid nominal outcome; ordinal agreement excludes Unknown and reports its own denominator. Correlation metrics evaluate candidate retrieval and do not establish same-incident identity. Extraction success requires human confirmation of article identity, title, canonical URL, relevant body content, and attribution. Summaries remain extractive and are not translations.
+## Screenshots
 
-For the follow-up pipeline investigation, see the [RSS, extraction, language, and processing validation report](docs/pipeline_validation_report.md). It documents the THN article-body mismatch, the verified legacy-language backfill, the backed-up additive SQLite migration, and current processing counts.
+No verified application screenshots are currently included. Add screenshots captured from an actual run here before publication; do not use mockups as evidence of implemented functionality.
 
-## Requirements and installation
+## Installation
 
-- Python 3.10 or newer
-- pip
-- Network access to configured publisher feeds for live RSS refreshes
+Python 3.10+ and pip are required. From the project root:
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
 
-The application uses Python, Streamlit, Pandas, Plotly, Feedparser, Requests, BeautifulSoup, and Pytest. Language detection uses the Python standard library; no model download, GPU, CUDA, or paid API is required.
+For an existing checkout with `.venv`:
 
-## Launch and collect
+```bash
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+```
+
+## Configuration
+
+Feeds are configured in `config/rss_sources.json`; each source has a name, URL, enabled flag, item cap, and delay. Only add sources whose access and use are permitted, and review publisher terms, robots rules, and rate limits. A configured endpoint can be unavailable. The dashboard reports observed feed status when refreshed.
+
+Environment variables:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `ETHIO_CYBER_DB_PATH` | `data/ethio_cyber_intel.db` | SQLite database location |
+| `ETHIO_CYBER_SEED_DEMO` | `true` | Seed clearly marked examples into an empty database |
+| `ETHIO_CYBER_FEEDS_FILE` | `config/rss_sources.json` | Feed configuration path |
+| `ETHIO_CYBER_HTTP_TIMEOUT` | `12` | HTTP timeout in seconds |
+
+Back up an existing database before applying application migrations. See [configuration](docs/configuration.md) and [backup/recovery instructions](docs/installation.md).
+
+## Run the dashboard
 
 ```bash
 source .venv/bin/activate
 streamlit run app.py
 ```
 
-Click **Refresh Intelligence** to check each enabled RSS source and collect new entries. A failed feed does not block other sources. Edit [`config/rss_sources.json`](config/rss_sources.json) to enable, disable, or change feed candidates. A configured feed is not necessarily available; the dashboard reports its status on refresh.
+Use **Refresh Intelligence** to collect configured feeds. Refresh runs preliminary classification and severity assessment for eligible pending records. Other actions are explicitly initiated in the dashboard: **Detect language for legacy reports**, **Classify pending reports**, **Assess pending severity**, **Correlate collected reports**, and **Generate extractive summary**. Do not interpret an automated result as human verification.
 
-If the feed has no full article body, extraction is attempted only for same-host HTTPS pages allowed by the publisher's `robots.txt`. The page's canonical URL and headline must match the requested RSS item, and extraction prefers explicit article-body containers rather than the first generic `<article>` element (which may be a recommendation card). Requests are timed out, not redirected, and rate limited. If page identity cannot be validated, the RSS title, description, URL, source, and publication date are retained and page content is omitted.
+When network access is unavailable, use the built-in DEMO DATA to demonstrate dashboard navigation and status handling. Demo records are synthetic and are not real reports. The live-source check documented in the [system validation report](docs/system_validation_report.md) observed 4/4 feeds parse successfully on 2026-11-25, producing 40 normalized entries with persistence disabled. That dated check does not guarantee current reachability. Stage 10 integration tests use mocked feeds.
 
-## Stage 3: language detection
+Step-by-step workflow and expected explanations for unknown results: [Demonstration Guide](docs/demonstration_guide.md).
 
-Supported labels:
-
-| Code | Meaning |
-| --- | --- |
-| `en` | English |
-| `am` | Amharic |
-| `om` | Afaan Oromo |
-| `und` | Unknown or insufficient evidence |
-| `mul` | Mixed language |
-
-The detector lives in `src/ethio_cyber_intel/language_detection.py`. It detects Amharic using Ethiopic Unicode-script evidence and uses a small, explicit set of English and Afaan Oromo lexical cues for Latin-script text. Clearly distinct language spans or a mixture of substantial script and lexical evidence can produce `mul`. Very short text, unsupported language text, and weak or conflicting evidence stay `und`.
-
-Each result has a confidence score and method. The score measures strength of these rules; it is **not a calibrated probability**. Afaan Oromo uses the Latin alphabet, so distinguishing it from English through a small cue list is inherently uncertain. Oromo results require careful review and validation against a much larger, independently labeled and representative dataset before any reliability claim. This stage does not claim language parity or production-grade accuracy.
-
-The dashboard separates language not yet assessed from a detector result of `und`. Use **Detect language for legacy reports** to process only untouched LIVE rows with `und`, no method, and no human review. That one-time path uses only the source title and RSS description, records the existing detector's method/confidence, and leaves uncertain results as `und`.
-
-During RSS normalization, the detector prefers full article text when available and otherwise evaluates the title and description together. Existing records are not silently relabeled. New database fields store `language_confidence`, `language_method`, and `language_reviewed`; reviewed labels are preserved. Demo examples retain their explicit labels and are marked as demo-labeled examples.
-
-The dashboard shows language filters, distribution, counts for all five labels, per-report confidence, and an uncertainty indication for unknown or low-confidence automatic labels.
-
-## Evaluation
-
-Run the small manually labeled synthetic sanity check:
-
-```bash
-source .venv/bin/activate
-python scripts/evaluate_language.py
-```
-
-It reports accuracy, per-language precision, recall, F1, support counts, macro averages, and a confusion matrix. The separate [`evaluation/language_eval.jsonl`](evaluation/language_eval.jsonl) file contains 15 researcher-authored examples, all explicitly marked synthetic and manually labeled. These examples are not collected threat reports and do not estimate real-world accuracy. Unit-test examples are separately kept in `tests/fixtures/` and are not used by the evaluator.
-
-To add examples, add one JSON object per line to the evaluation file with `text`, `label` (`en`, `am`, `om`, `und`, or `mul`), `labeling: "manually_labeled"`, `synthetic`, and a provenance `source_note`. For real source text, first document permission and provenance, remove sensitive personal data, and follow the source's retention terms. Do not represent synthetic text as observed intelligence.
-
-## Stage 4: threat classification
-
-The classifier supports multiple simultaneous labels for each report:
-
-`phishing`, `malware`, `ransomware`, `vulnerability`, `data_breach`, `ddos`, `cyber_espionage`, `credential_theft`, `other`, and `unknown`.
-
-`src/ethio_cyber_intel/threat_classification.py` implements a deterministic CPU-only multilingual keyword and phrase baseline. It emits the matched evidence, classifier method/version, classification status, UTC timestamp, and a per-category heuristic score. Scores are evidence-strength heuristics, **not calibrated probabilities**. Generic cyber terms may produce `other`; when no supported evidence is present, the result is `unknown`. The tool does not train a model and does not call a paid service. This is an explainable baseline, not advanced AI or an assertion that a report is true.
-
-Language-specific rules are gated by the existing Stage 3 language label. Shared protocol/category terms may be matched for `und`; language-specific English, Amharic, or Oromo cues are not inferred merely from Latin script. `mul` permits cues for all three languages. English and Amharic rules have focused synthetic unit coverage, and a small number of Oromo rules use terminology found in the [ICT Development Office / Ethiopian Languages Research Center multilingual ICT glossary](https://oromianeconomist.com/wp-content/uploads/2017/08/ict-glossary-in-afaan-oromoo-amharic-and-tigarinya.pdf). This does **not** validate broad Afaan Oromo classification. Oromo phrase coverage is narrow, code-switching and inflection can cause misses, and all languages require human review. In particular, do not interpret category scores as comparable across languages.
-
-The database stores append-only classification runs in `threat_classification_runs` and their multi-label evidence in `threat_classification_labels`; source article fields are preserved. The dashboard can classify pending reports explicitly, shows labels/evidence/method/heuristic confidence, provides category filters and charts, and distinguishes unclassified reports from a classifier `unknown` result. Human-reviewed labels are retained and suppress subsequent automatic classification for that article. “LIVE” describes source collection only; it does not mean the report or label was verified.
-
-### Stage 4 evaluation
-
-The separate [`evaluation/threat_eval.jsonl`](evaluation/threat_eval.jsonl) dataset is intentionally empty until manually reviewed examples are added. The evaluator reports exact multi-label subset accuracy, micro and per-category precision/recall/F1, per-language micro scores, supports, and one-vs-rest multilabel confusion counts. There are currently **zero research evaluation examples**, so no classification performance metrics are claimed. Synthetic unit tests live under `tests/` and are not evaluation data. The classifier does not train on evaluation examples.
-
-Add one reviewed row per line (also see [`evaluation/threat_evaluation.md`](evaluation/threat_evaluation.md)):
-
-```json
-{"text":"reviewed report excerpt", "language":"om", "labels":["malware"], "manually_reviewed":true, "source_note":"Publisher, URL, access date, and permission/provenance details"}
-```
-
-Use language `en`, `am`, or `om`; list all applicable labels for multi-label incidents, or use `labels: ["unknown"]` when manual review finds no supported category. Retain only text that may be stored, remove personal data, and record provenance and permission. Do not label synthetic text as real evidence. Evaluate with:
-
-```bash
-python scripts/evaluate_threat_classifier.py
-```
-
-Small or convenience samples are exploratory and cannot establish real-world accuracy or parity among languages.
-
-## Stage 5: evidence-based severity assessment
-
-Severity is a prioritization dimension separate from Stage 4 threat categories. A report may be classified as ransomware while its severity is `Unknown`; a vulnerability category alone does not imply `Critical`, and a ransomware mention does not establish confirmed impact.
-
-Supported levels are `Critical`, `High`, `Medium`, `Low`, `Informational`, and `Unknown`. `src/ethio_cyber_intel/severity_assessment.py` uses a documented deterministic policy rather than a learned model or probability:
-
-- An article-reported CVSS score maps to the matching qualitative band but remains a `reported_claim`, with an explicit unverified explanation. A CVE identifier alone never raises severity.
-- CVSS v3.x/v4 qualitative thresholds follow FIRST: 0.0 maps to Informational/None, 0.1–3.9 Low, 4.0–6.9 Medium, 7.0–8.9 High, and 9.0–10.0 Critical. CVSS describes vulnerability severity and should not be treated alone as full incident risk. See the [FIRST CVSS v3.1 specification](https://www.first.org/cvss/v3.1/specification-document) and [user guide](https://www.first.org/cvss/v3.1/user-guide).
-- `High` may be assigned when an explicitly documented external source confirms exploitation and at least one impact, or provides a verified High CVSS score. `Critical` requires a verified Critical CVSS score; textual incident claims alone do not qualify.
-- Confirmed exploitation without a confirmed impact, or a confirmed impact without known scale, is Medium. Article-reported exploitation, a reported proof of concept, or a reported/potential impact can also create Medium review priority, but the result remains preliminary and the claims are not independently verified.
-- `Low` requires a verified or source-reported Low CVSS score. `Informational` requires an explicit informational/awareness notice without stronger evidence. Missing or insufficient evidence stays `Unknown`, never Low by default. Contradictory evidence returns Unknown with a conflict explanation.
-
-Each assessment stores its explanation, evidence items, source attribution, article publication date and original URL, evidence completeness, method/version, status, and UTC timestamp. Extracted CVEs, CVSS values, product mentions, exploitation phrases, and impact phrases are attributed to the original article as reported claims. The classifier does not establish that a CVE exists, that a score is current, that a product is affected, or that a reported impact occurred.
-
-Current text-pattern extraction is English-focused; it does not yet provide validated Amharic or Afaan Oromo exploitation/impact phrase coverage. The severity framework accepts language-neutral structured external evidence for any report, but no equal performance across languages is claimed. Language-specific evaluation is required before operational use.
-
-No external CVE or exploitation lookup is currently performed, and no paid API is required. `assess_severity(article, external_evidence=...)` accepts future enrichment records only when a caller supplies `verification_status: "verified"`, a source name, source URL, and retrieval time. The caller must actually retrieve and check that source before marking it verified; merely adding a URL is insufficient. The current dashboard assessment action supplies article evidence only, so it cannot produce externally verified findings. Network failures and terms/rate limits remain the responsibility of any future permitted source adapter.
-
-The database keeps append-only rows in `severity_assessments`; it preserves earlier automated assessments and does not replace an article's text or Stage 4 labels. Human-reviewed assessments become the current record and block later automated assessments for that article. The dashboard has severity filters and charts, a Critical/High priority table, explanations, source evidence, and a completeness summary. Automated assessment status is shown separately from the severity level.
-
-### Stage 5 evaluation
-
-The separate [`evaluation/severity_eval.jsonl`](evaluation/severity_eval.jsonl) dataset is currently empty. Thus agreement, per-class precision/recall, macro F1, confusion matrix counts, and per-language agreement are **unavailable**. Synthetic tests do not count as research evaluation. To add examples, use the schema and provenance instructions in [`evaluation/severity_evaluation.md`](evaluation/severity_evaluation.md), with a manually reviewed `human_severity`, language, source note, and `manually_reviewed: true`. Run:
-
-```bash
-python scripts/evaluate_severity.py
-```
-
-Small convenience samples are exploratory and cannot establish real-world severity performance or language parity.
-
-## Stage 6: cross-language report correlation
-
-The correlation engine compares articles in English (`en`), Amharic (`am`), and Afaan Oromo (`om`). Supported cross-language pairs are English–Amharic, English–Afaan Oromo, and Amharic–Afaan Oromo. `mul` and `und` articles can be compared, but do not receive the explicit cross-language candidate path unless a strong identifier/entity matches; they are not included in the three named language-pair evaluation groups.
-
-`src/ethio_cyber_intel/correlation.py` extracts normalized CVE identifiers, explicitly labeled campaign IDs, and explicitly labeled malware family, actor, and product names. It can also accept curated entity metadata on an article record. Exact shared CVEs, campaign IDs, and malware-family mentions are strong candidate signals. Product/actor overlaps are weaker. Same-language character-trigram and normalized token overlap, shared threat-category context, and publication-date proximity are weak supporting signals only. Dates missing on either side do not contribute. Source identity and original URLs are retained as provenance, not treated as proof of common origin. Actor-name overlap records a mention match only; it makes no attribution.
-
-The similarity score is a heuristic, not a probability. An exact identifier or explicit entity can produce a candidate, while direct lexical overlap alone does not create a cross-language candidate. Same-language text similarity can contribute to a candidate when it clears the documented threshold. The returned status is `Candidate` or `Insufficient evidence`; neither means confirmed same incident. Article publication time is used as a weak proxy because reported incident dates are not consistently extracted. No embedding model, GPU, paid API, external lookup, or newly added dependency is used.
-
-Use **Correlate collected reports** to compare up to the 300 most recent LIVE reports. DEMO DATA is excluded. The dashboard shows related report details, identifiers/entities, terms, methods, evidence, score, and language pair; it also displays a small relationship graph. A reviewer can mark a candidate `Human confirmed` or `Human rejected`, with an optional note. A human decision is appended to history and blocks later automated replacement. “Human confirmed” means a reviewer accepted a relationship; it does not independently verify all report claims or attribution.
-
-SQLite stores unique canonical article pairs in `correlation_pairs` and append-only candidate/review decisions in `correlation_assessments`. Re-running correlation avoids duplicate pair rows and does not append a repeated candidate assessment. A later human decision remains current; earlier automated and human decisions are preserved in history.
-
-### Stage 6 evaluation
-
-The separate [`evaluation/correlation_eval.jsonl`](evaluation/correlation_eval.jsonl) dataset is currently empty. Precision, recall, F1, false-positive rate, and results by English–Amharic, English–Afaan Oromo, and Amharic–Afaan Oromo are therefore **unavailable**. Add only permissioned, manually reviewed article pairs using the schema in [`evaluation/correlation_evaluation.md`](evaluation/correlation_evaluation.md). The evaluator measures candidate retrieval: same-incident and related-but-different pairs are relevant candidates, unrelated pairs are negatives, and insufficient-evidence pairs are reported separately and excluded from the binary metrics. It reports the four human-label supports and candidate rates but does not claim the baseline distinguishes the same event from a related event. Run:
-
-```bash
-python scripts/evaluate_correlation.py
-```
-
-Do not copy synthetic tests into the research evaluation dataset.
-
-## Stage 7: evidence-grounded summarization
-
-The summary baseline supports source-language extraction for articles labeled English (`en`), Amharic (`am`), and Afaan Oromo (`om`). It ranks source sentences with token-frequency centrality and small, transparent CVE/impact/exploitation evidence boosts, then returns selected sentences verbatim in the original order. It is deterministic, CPU-only, and does not use a language model.
-
-**Extractive summary** means selected text copied directly from the source. This release does not generate a paraphrase or translate. If a requested output language differs from the detected source language, the result is saved with status `unsupported_translation` and no summary text. Unknown, mixed, or unsupported source languages return `unsupported_language`; source material below the minimum length or without enough sentence evidence returns `insufficient_content`. A dashboard language selector is available, but it does not imply translation capability. No paid translation API or multilingual generation model is used.
-
-Every summary history row stores the article ID, requested/original summary language, exact source text used, source text fingerprint, selected source excerpts, source metadata (title, publication date, source, URL and detected language), summary method/version, status, key intelligence, and timestamp. The exact original source URL is preserved. Missing publication dates are shown as Unknown. CVEs are extracted only when present in source text. Product and malware names require explicit source labeling. Threat categories are copied from Stage 4 only when supplied and are labeled preliminary automated outputs. Impact and exploitation excerpts are marked as reported claims, not verified facts. Missing entities and claims remain “Not reported”; no actor attribution or CVE details are generated.
-
-Current key-intelligence phrase extraction for impacts and exploitation is English-focused; only identifier extraction and explicitly labeled entities are more language-neutral. Sentence selection itself preserves English, Amharic, or Afaan Oromo text exactly, but this does not establish that a selected summary is readable, complete, or useful in those languages. Afaan Oromo and Amharic require review by fluent readers. We do not claim quality parity across languages.
-
-**Local model practicality assessment:** no local model was added or benchmarked in this stage because extractive sentence selection satisfies the no-download, CPU-only baseline and avoids unvalidated generated text. A possible later translation adapter is QVAC TranslatePsy-AfriSLM: its publisher lists support for Amharic and Oromo and 4-bit variants, with the 0.8B model listed at about 0.7 GB and described as running on laptops without a GPU ([model details](https://qvac.tether.io/models/translatepsy), [model card](https://huggingface.co/qvac/TranslatePsy-AfriSLM-4B)). Those are publisher specifications, not ETHIO-CYBER INTEL measurements. It is a translation model, not a summarizer; its latency, peak RAM, CTI terminology fidelity, and pairwise quality on Amharic/Afaan Oromo cybersecurity text have not been tested here. It was therefore not installed or enabled. Any future adapter needs human-reviewed language-pair evaluation and a license/runtime review before use.
-
-The dashboard’s **Evidence-grounded article summary** workspace selects an article and requested language, generates an extractive summary, and shows its status, key intelligence, supporting excerpts, source metadata, and source-text snapshot. It keeps prior summaries visible. Identical source text, language, method, and version are not written twice. A human-reviewed summary is preserved and blocks later automatic writes for that article/language. Summary status distinguishes original extractive output from unavailable translation and insufficient or unsupported input.
-
-### Stage 7 evaluation
-
-The separate [`evaluation/summary_eval.jsonl`](evaluation/summary_eval.jsonl) dataset is empty until reviewed examples are added. Factual consistency, important-information coverage, language correctness, readability, usefulness, and unsupported-claim rate are therefore **unavailable**. The evaluator reports ratings overall and separately for `en`, `am`, and `om`; Amharic/Afaan Oromo review should involve fluent readers, preferably independent reviewers. See [`evaluation/summary_evaluation.md`](evaluation/summary_evaluation.md) for the record schema and provenance rules. Evaluators rate the exact output from the recorded method version; the script does not itself determine factuality or readability. Run:
-
-```bash
-python scripts/evaluate_summaries.py
-```
-
-Do not copy synthetic unit-test text into the research dataset.
-
-## Tests and compilation
+## Testing and validation
 
 ```bash
 source .venv/bin/activate
 python -m pytest -v
 python -m compileall -q app.py src tests scripts
+git diff --check
+python -m pip check
 ```
 
-RSS tests use mocked feeds and make no live network requests. The dashboard compatibility test uses a temporary SQLite database.
+Tests use mocked network responses and temporary databases. They do not modify the operational SQLite data or verify current feed uptime.
 
-## Configuration and database
+## Research evaluation and reproducibility
 
-| Variable | Default | Description |
-| --- | --- | --- |
-| `ETHIO_CYBER_DB_PATH` | `data/ethio_cyber_intel.db` | SQLite database path |
-| `ETHIO_CYBER_SEED_DEMO` | `true` | Seed clearly marked examples in an empty database |
-| `ETHIO_CYBER_FEEDS_FILE` | `config/rss_sources.json` | RSS source JSON file |
-| `ETHIO_CYBER_HTTP_TIMEOUT` | `12` | HTTP timeout in seconds |
+Run all task evaluations or the unified report:
 
-Database initialization migrates the existing articles table transactionally, preserves row IDs and article content, and adds the `mul` language value plus confidence/method/review fields. SQLite requires a table migration to update the existing language `CHECK` constraint. A separate additive migration adds `content_validation_status`; existing non-empty body text is retained as `legacy_unverified`, not treated as validated evidence. Analyses and summaries use full body text only when it came from an RSS entry or passed page identity validation. Existing language labels and review history are not overwritten. Back up the database before applying migrations.
+```bash
+python scripts/evaluate_language.py
+python scripts/evaluate_threat_classifier.py
+python scripts/evaluate_severity.py
+python scripts/evaluate_correlation.py
+python scripts/evaluate_extraction.py
+python scripts/evaluate_summaries.py
+python scripts/run_research_evaluation.py
+```
 
-## Data and scope limitations
+Reproduce the local correlation microbenchmark:
 
-- `collected` means received from a source, not verified as true.
-- Missing publication dates remain empty; no dates or reports are fabricated.
-- Exact URL/content fingerprints are checked for duplicates; paraphrase-level duplicates are not detected.
-- Afaan Oromo cue coverage is small and may miss valid Oromo text or confuse overlapping vocabulary. Manually review uncertain labels and evaluate with diverse Oromo examples.
-- Stage 4 classification is a hand-built phrase baseline, not a learned classifier. Coverage is incomplete, scores are uncalibrated, and the current threat evaluation dataset is empty.
-- Stage 5 severity is a conservative report-evidence triage policy, not organizational risk scoring, incident validation, or calibrated prediction. Current dashboard assessments use article text only; no external source has been queried. Severity evaluation data is empty.
-- Stage 6 correlation is candidate retrieval, not incident adjudication. Cross-language detection depends mainly on shared explicit identifiers/entity names and misses reports that paraphrase without such anchors. Direct word/character overlap is not cross-language semantic understanding. There are no manually reviewed research pairs, so performance is unmeasured.
-- Stage 7 summaries are extractive and source-language only. Translation and abstractive generation are not implemented. Current impact/exploitation phrase extraction is English-focused, and the human evaluation set is empty.
-- The current evaluation data is synthetic and too small to support research conclusions. Build a permissioned, manually reviewed corpus before reporting accuracy as a real-world result.
-- Multilingual summaries are not part of this stage.
+```bash
+python scripts/benchmark_correlation.py --sizes 40 100 300 --repeats 3
+```
 
-## Project layout
+The benchmark uses deterministic synthetic in-memory reports and does not represent real incident data or end-to-end throughput. Details and observations are in [Stage 10 integration report](docs/stage10_integration_report.md). Full instructions: [Reproducibility Guide](docs/reproducibility.md).
+
+### Current evidence snapshot
+
+- The local database was inspected read-only on 2026-11-25: 46 articles (43 LIVE, 3 DEMO); integrity check `ok`, no foreign-key violations. It also held 46 classification runs, 46 severity assessments, six correlation pairs/assessments, and seven summaries. These are stored result counts, not independent validation.
+- `evaluation/language_eval.jsonl` contains 15 researcher-authored synthetic examples (three for each supported output label) and a 100% synthetic sanity-check result. This is **not** real-world accuracy.
+- The threat, severity, correlation, extraction, and summary research datasets contain no eligible independently reviewed examples. Their performance metrics are unavailable.
+- Correlation’s local synthetic benchmark recorded 7.03×, 8.30×, and 8.38× median in-memory candidate-generation speedups at 40, 100, and 300 reports respectively, with candidate counts unchanged in those fixtures. Pairwise complexity remains quadratic; see the benchmark report for scope.
+
+### Dataset and provenance policy
+
+Research datasets are distinct from test fixtures and operational records. Add only permissioned, appropriately retained examples with source identity, URL/provenance, language, reviewer decision, review date, dataset version, and inclusion rationale. Keep `synthetic: true` examples out of real-world metric calculations. Follow [annotation guidelines](docs/stage9_annotation_guidelines.md) and the templates under `evaluation/templates/`. Evaluation scripts do not create labels or ground truth.
+
+## Limitations
+
+- Afaan Oromo uses Latin script and is distinguished from English using limited lexical cues. Detection needs broad independent validation; no language parity claim is supported.
+- Threat categories use hand-built rules, not a trained classifier. Severity is a preliminary evidence policy and does not query external CVE/KEV sources by default.
+- Correlation finds candidates using shared identifiers/entities and lexical/date signals; it is not multilingual semantic understanding and does not prove same-event identity or attribution.
+- Summaries are extractive and source-language only. There is no translation or abstractive generation.
+- Feed access and publisher HTML are time-dependent. The documented successful feed check is dated; live extraction has not been exhaustively evaluated.
+- Hostname DNS resolution/private-address validation and response-size limits remain incomplete. The dependency set has not undergone a vulnerability scan, and deployment security has not been audited.
+- The local Streamlit/SQLite application has no authentication/authorization or multi-user deployment hardening. Do not expose it directly to the public internet.
+- Evaluation data is insufficient for real-world effectiveness claims.
+
+See [Known Limitations](docs/known_limitations.md), [Security and Ethics Review](docs/security_and_ethics_review.md), and the [final research paper](docs/final_research_paper.md).
+
+## Ethics and safe scope
+
+The platform is for defensive research using public, permitted reports. It does not execute attacks or bypass access controls. It preserves source attribution, distinguishes collected claims from verified evidence, and requires human review before validated intelligence claims. Researchers must follow source terms, robots policies, rate limits, privacy requirements, and applicable law; minimize personal data; and avoid unsupported actor attribution or impact statements.
+
+## Project structure
 
 ```text
-app.py                                  Streamlit dashboard and refresh workflow
-config/rss_sources.json                Editable RSS source candidates
-evaluation/language_eval.jsonl         Separate synthetic labeled sanity-check data
-scripts/evaluate_language.py           Metrics and confusion-matrix tool
-src/ethio_cyber_intel/
-  article_extractor.py                  robots-aware page extraction
-  config.py                             Environment-backed settings
-  dashboard_data.py                     SQLite dashboard queries
-  database.py                           Schema, migrations, and inserts
-  language_detection.py                 CPU-only language detection heuristics
-  threat_classification.py              Evidence-producing multilingual rules baseline
-  severity_assessment.py               Evidence-led severity triage rules
-  correlation.py                        Explainable cross-language candidate matching
-  summarization.py                      CPU-only extractive summary and evidence extraction
-  rss_collector.py                      RSS fetching and normalization
-  rss_sources.py                        RSS configuration validation
-tests/                                  Offline tests and separate synthetic fixtures
-evaluation/threat_eval.jsonl            Empty, manually reviewed research evaluation set
-scripts/evaluate_threat_classifier.py   Multilabel evaluation metrics
-evaluation/severity_eval.jsonl         Empty, manually reviewed severity evaluation set
-scripts/evaluate_severity.py             Severity agreement and classification metrics
-evaluation/correlation_eval.jsonl       Empty, manually reviewed article-pair evaluation set
-scripts/evaluate_correlation.py          Candidate retrieval evaluation metrics
-evaluation/summary_eval.jsonl            Empty, manually reviewed summary evaluation set
-scripts/evaluate_summaries.py             Human-rating summary evaluation metrics
+app.py                         Streamlit dashboard and user-triggered workflows
+config/rss_sources.json        Operator-managed RSS/Atom sources
+data/                          Local SQLite database (not a research dataset)
+docs/                          Research paper, architecture, evaluation, and operating guides
+evaluation/                    Separate research data and annotation templates
+scripts/                       Evaluation and correlation benchmark commands
+src/ethio_cyber_intel/         Collection, extraction, analysis, persistence, and dashboard modules
+tests/                         Offline unit/integration tests and synthetic fixtures
+requirements.txt               Runtime and test dependencies
 ```
+
+## Delivery documents
+
+- [Research paper](docs/final_research_paper.md)
+- [Final architecture](docs/final_architecture.md)
+- [Presentation outline](docs/final_presentation_outline.md)
+- [Demonstration guide](docs/demonstration_guide.md)
+- [Security and ethics review](docs/security_and_ethics_review.md)
+- [Reproducibility guide](docs/reproducibility.md)
+- [Evaluation methodology and results](docs/research_evaluation_report.md)
+- [Known limitations](docs/known_limitations.md)
+
+## Future work
+
+Collect a permissioned, stratified multilingual corpus; obtain independent fluent review; evaluate baselines on fixed splits; examine source and language coverage; conduct extraction and summary quality studies; add DNS/private-address and response-size protections; perform dependency and deployment audits; and evaluate usability with analysts. These items require separate approval and evidence; they are not claimed as completed.

@@ -64,7 +64,8 @@ def extract_signals(article: dict[str, Any]) -> dict[str, Any]:
         categories = [categories]
     return {
         "identifiers": identifiers, "entities": entities, "terms": terms,
-        "text": normalized_text, "language": article.get("language") or "und",
+        "text": normalized_text, "char_ngrams": _char_ngrams(normalized_text),
+        "language": article.get("language") or "und",
         "categories": {str(value).casefold() for value in categories},
     }
 
@@ -75,8 +76,9 @@ def _char_ngrams(text: str, n: int = 3) -> set[str]:
 
 
 def _jaccard(left: set[str], right: set[str]) -> float:
-    union = left | right
-    return len(left & right) / len(union) if union else 0.0
+    intersection_size = len(left & right)
+    union_size = len(left) + len(right) - intersection_size
+    return intersection_size / union_size if union_size else 0.0
 
 
 def _date_gap_days(left: Any, right: Any) -> int | None:
@@ -118,7 +120,16 @@ class CorrelationResult:
 
 def correlate_pair(article_a: dict[str, Any], article_b: dict[str, Any]) -> CorrelationResult:
     """Compare two reports, returning a candidate or insufficient evidence."""
-    signals_a, signals_b = extract_signals(article_a), extract_signals(article_b)
+    return _correlate_pair_with_signals(
+        article_a, article_b, extract_signals(article_a), extract_signals(article_b)
+    )
+
+
+def _correlate_pair_with_signals(
+    article_a: dict[str, Any], article_b: dict[str, Any],
+    signals_a: dict[str, Any], signals_b: dict[str, Any],
+) -> CorrelationResult:
+    """Score a pair from reusable article signals without altering match rules."""
     matching_ids = []
     entities = []
     evidence = []
@@ -154,7 +165,7 @@ def correlate_pair(article_a: dict[str, Any], article_b: dict[str, Any]) -> Corr
     same_language = signals_a["language"] == signals_b["language"] and signals_a["language"] in {"en", "am", "om"}
     char_similarity = 0.0
     if same_language and min(len(signals_a["text"]), len(signals_b["text"])) >= 40:
-        char_similarity = _jaccard(_char_ngrams(signals_a["text"]), _char_ngrams(signals_b["text"]))
+        char_similarity = _jaccard(signals_a["char_ngrams"], signals_b["char_ngrams"])
         if char_similarity:
             score += min(0.25, char_similarity * 0.35)
             methods.append("same_language_character_trigram_jaccard")
@@ -205,10 +216,12 @@ def correlate_pair(article_a: dict[str, Any], article_b: dict[str, Any]) -> Corr
 def correlate_articles(articles: list[dict[str, Any]]) -> list[CorrelationResult]:
     """Return only candidate pairs from a small supplied batch."""
     results = []
-    for first, second in itertools.combinations(articles, 2):
-        if first.get("id") is not None and first.get("id") == second.get("id"):
+    prepared = [extract_signals(article) for article in articles]
+    for first, second in itertools.combinations(range(len(articles)), 2):
+        article_a, article_b = articles[first], articles[second]
+        if article_a.get("id") is not None and article_a.get("id") == article_b.get("id"):
             continue
-        result = correlate_pair(first, second)
+        result = _correlate_pair_with_signals(article_a, article_b, prepared[first], prepared[second])
         if result.status == "Candidate":
             results.append(result)
     return results

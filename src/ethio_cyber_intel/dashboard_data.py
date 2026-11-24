@@ -55,6 +55,21 @@ def load_current_severity_assessments(db_path=None) -> pd.DataFrame:
         )
 
 
+def load_current_summaries(db_path=None) -> pd.DataFrame:
+    """Load the latest summary state for each report, including non-output states."""
+    with connect(db_path) as connection:
+        return pd.read_sql_query(
+            """WITH latest AS (
+                   SELECT article_id, MAX(id) AS summary_id
+                   FROM article_summaries GROUP BY article_id
+               )
+               SELECT s.article_id,s.summary_status,s.summary_language,s.summary_method,s.method_version,s.created_at
+               FROM latest x JOIN article_summaries s ON s.id=x.summary_id
+               ORDER BY s.article_id""",
+            connection,
+        )
+
+
 def load_current_correlations(db_path=None) -> pd.DataFrame:
     """Load latest relationship decision plus source-attributed article details."""
     with connect(db_path) as connection:

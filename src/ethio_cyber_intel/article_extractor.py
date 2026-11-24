@@ -14,6 +14,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from .config import request_timeout
+from .url_safety import is_public_https_url
 
 logger = logging.getLogger(__name__)
 USER_AGENT = "ETHIO-CYBER-INTEL/0.2 (+local research RSS reader)"
@@ -55,10 +56,16 @@ class ArticleExtractor:
     """Fetch only same-publisher public pages that robots.txt permits."""
 
     def __init__(self, *, session=None, timeout: float | None = None):
-        self.session = session or requests.Session()
+        self._owns_session = session is None
+        self.session = session if session is not None else requests.Session()
         self.timeout = timeout or request_timeout()
         self._robots: dict[str, RobotFileParser | None] = {}
         self._last_request: dict[str, float] = {}
+
+    def close(self) -> None:
+        """Close the internally created HTTP session, if owned by this instance."""
+        if self._owns_session:
+            self.session.close()
 
     def _robots_for(self, origin: str) -> RobotFileParser | None:
         if origin in self._robots:
@@ -96,7 +103,7 @@ class ArticleExtractor:
         """
         parsed = urlparse(url)
         host = (parsed.hostname or "").lower()
-        if (parsed.scheme != "https" or not host or host != allowed_hostname.lower()
+        if (not is_public_https_url(url) or not host or host != allowed_hostname.lower()
                 or not expected_title or not expected_title.strip()):
             return None
         origin = f"https://{host}"
