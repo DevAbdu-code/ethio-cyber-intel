@@ -1,8 +1,8 @@
 # ETHIO-CYBER INTEL
 
-A CPU-friendly research application for trilingual cyber threat intelligence aggregation and analysis. Stage 1 provides the Streamlit dashboard and SQLite store; Stage 2 adds configurable RSS collection and careful article extraction; Stage 3 adds conservative language detection and transparent evaluation tooling.
+A CPU-friendly research application for trilingual cyber threat intelligence aggregation and analysis. Stage 1 provides the Streamlit dashboard and SQLite store; Stage 2 adds configurable RSS collection and careful article extraction; Stage 3 adds conservative language detection; Stage 4 adds preliminary, explainable multi-label threat categorization.
 
-Collected reports are source-attributed but are not independently verified advisories. No threat classification or severity scoring is performed.
+Collected reports are source-attributed but are not independently verified advisories. Automated threat labels are preliminary rule matches, not verified intelligence or calibrated probabilities. No severity scoring or incident correlation is performed.
 
 ## Requirements and installation
 
@@ -63,6 +63,36 @@ It reports accuracy, per-language precision, recall, F1, support counts, macro a
 
 To add examples, add one JSON object per line to the evaluation file with `text`, `label` (`en`, `am`, `om`, `und`, or `mul`), `labeling: "manually_labeled"`, `synthetic`, and a provenance `source_note`. For real source text, first document permission and provenance, remove sensitive personal data, and follow the source's retention terms. Do not represent synthetic text as observed intelligence.
 
+## Stage 4: threat classification
+
+The classifier supports multiple simultaneous labels for each report:
+
+`phishing`, `malware`, `ransomware`, `vulnerability`, `data_breach`, `ddos`, `cyber_espionage`, `credential_theft`, `other`, and `unknown`.
+
+`src/ethio_cyber_intel/threat_classification.py` implements a deterministic CPU-only multilingual keyword and phrase baseline. It emits the matched evidence, classifier method/version, classification status, UTC timestamp, and a per-category heuristic score. Scores are evidence-strength heuristics, **not calibrated probabilities**. Generic cyber terms may produce `other`; when no supported evidence is present, the result is `unknown`. The tool does not train a model and does not call a paid service. This is an explainable baseline, not advanced AI or an assertion that a report is true.
+
+Language-specific rules are gated by the existing Stage 3 language label. Shared protocol/category terms may be matched for `und`; language-specific English, Amharic, or Oromo cues are not inferred merely from Latin script. `mul` permits cues for all three languages. English and Amharic rules have focused synthetic unit coverage, and a small number of Oromo rules use terminology found in the [ICT Development Office / Ethiopian Languages Research Center multilingual ICT glossary](https://oromianeconomist.com/wp-content/uploads/2017/08/ict-glossary-in-afaan-oromoo-amharic-and-tigarinya.pdf). This does **not** validate broad Afaan Oromo classification. Oromo phrase coverage is narrow, code-switching and inflection can cause misses, and all languages require human review. In particular, do not interpret category scores as comparable across languages.
+
+The database stores append-only classification runs in `threat_classification_runs` and their multi-label evidence in `threat_classification_labels`; source article fields are preserved. The dashboard can classify pending reports explicitly, shows labels/evidence/method/heuristic confidence, provides category filters and charts, and distinguishes unclassified reports from a classifier `unknown` result. Human-reviewed labels are retained and suppress subsequent automatic classification for that article. “LIVE” describes source collection only; it does not mean the report or label was verified.
+
+### Stage 4 evaluation
+
+The separate [`evaluation/threat_eval.jsonl`](evaluation/threat_eval.jsonl) dataset is intentionally empty until manually reviewed examples are added. The evaluator reports exact multi-label subset accuracy, micro and per-category precision/recall/F1, per-language micro scores, supports, and one-vs-rest multilabel confusion counts. There are currently **zero research evaluation examples**, so no classification performance metrics are claimed. Synthetic unit tests live under `tests/` and are not evaluation data. The classifier does not train on evaluation examples.
+
+Add one reviewed row per line (also see [`evaluation/threat_evaluation.md`](evaluation/threat_evaluation.md)):
+
+```json
+{"text":"reviewed report excerpt", "language":"om", "labels":["malware"], "manually_reviewed":true, "source_note":"Publisher, URL, access date, and permission/provenance details"}
+```
+
+Use language `en`, `am`, or `om`; list all applicable labels for multi-label incidents, or use `labels: ["unknown"]` when manual review finds no supported category. Retain only text that may be stored, remove personal data, and record provenance and permission. Do not label synthetic text as real evidence. Evaluate with:
+
+```bash
+python scripts/evaluate_threat_classifier.py
+```
+
+Small or convenience samples are exploratory and cannot establish real-world accuracy or parity among languages.
+
 ## Tests and compilation
 
 ```bash
@@ -90,6 +120,7 @@ Database initialization migrates the existing articles table transactionally, pr
 - Missing publication dates remain empty; no dates or reports are fabricated.
 - Exact URL/content fingerprints are checked for duplicates; paraphrase-level duplicates are not detected.
 - Afaan Oromo cue coverage is small and may miss valid Oromo text or confuse overlapping vocabulary. Manually review uncertain labels and evaluate with diverse Oromo examples.
+- Stage 4 classification is a hand-built phrase baseline, not a learned classifier. Coverage is incomplete, scores are uncalibrated, and the current threat evaluation dataset is empty.
 - The current evaluation data is synthetic and too small to support research conclusions. Build a permissioned, manually reviewed corpus before reporting accuracy as a real-world result.
 - Threat classification, cross-language incident correlation, multilingual summaries, and severity scoring are not part of this stage.
 
@@ -106,7 +137,10 @@ src/ethio_cyber_intel/
   dashboard_data.py                     SQLite dashboard queries
   database.py                           Schema, migrations, and inserts
   language_detection.py                 CPU-only language detection heuristics
+  threat_classification.py              Evidence-producing multilingual rules baseline
   rss_collector.py                      RSS fetching and normalization
   rss_sources.py                        RSS configuration validation
 tests/                                  Offline tests and separate synthetic fixtures
+evaluation/threat_eval.jsonl            Empty, manually reviewed research evaluation set
+scripts/evaluate_threat_classifier.py   Multilabel evaluation metrics
 ```

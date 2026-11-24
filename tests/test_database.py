@@ -141,6 +141,53 @@ class DatabaseInitializationTests(unittest.TestCase):
             ).fetchone()
         self.assertEqual(row, ("om", 0.99, "manual_review", 1))
 
+    def test_stage_four_migration_adds_history_without_changing_articles(self):
+        initialize_database(self.db_path, seed_demo=False)
+        from src.ethio_cyber_intel.database import connect, insert_live_articles
+        insert_live_articles([{
+            "title": "A ransomware incident exposed customer data in a data breach",
+            "url": "https://news.example.test/classify",
+            "source": "Test source", "language": "en", "summary": "Original description",
+            "content": "Original body retained unchanged.",
+        }], self.db_path)
+        with connect(self.db_path) as connection:
+            before = tuple(connection.execute(
+                "SELECT title,url,source,summary,content FROM articles"
+            ).fetchone())
+            tables = {row[0] for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )}
+        self.assertIn("threat_classification_runs", tables)
+        self.assertIn("threat_classification_labels", tables)
+        self.assertEqual(before[0], "A ransomware incident exposed customer data in a data breach")
+        self.assertEqual(before[3:], ("Original description", "Original body retained unchanged."))
+
+    def test_classification_history_multi_label_and_human_review_protection(self):
+        from src.ethio_cyber_intel.database import (
+            classify_pending_articles, connect, insert_live_articles, save_manual_classification,
+        )
+        from src.ethio_cyber_intel.dashboard_data import load_current_classifications
+        initialize_database(self.db_path, seed_demo=False)
+        insert_live_articles([{
+            "title": "Ransomware encrypted files and exposed customer data in a data breach",
+            "url": "https://news.example.test/multi", "source": "Test source", "language": "en",
+        }], self.db_path)
+        article_id = 1
+        result = classify_pending_articles(self.db_path)
+        self.assertEqual(result["classified"], 1)
+        rows = load_current_classifications(self.db_path)
+        self.assertTrue({"ransomware", "data_breach"}.issubset(set(rows["category"])))
+        save_manual_classification(article_id, [{"category": "ransomware"}], language="en", db_path=self.db_path)
+        with connect(self.db_path) as connection:
+            prior_runs = connection.execute(
+                "SELECT COUNT(*) FROM threat_classification_runs WHERE article_id=?", (article_id,)
+            ).fetchone()[0]
+        self.assertEqual(classify_pending_articles(self.db_path)["classified"], 0)
+        self.assertEqual(prior_runs, 2)
+        current = load_current_classifications(self.db_path)
+        self.assertEqual(set(current["category"]), {"ransomware"})
+        self.assertEqual(set(current["status"]), {"human_reviewed"})
+
 
 if __name__ == "__main__":
     unittest.main()
