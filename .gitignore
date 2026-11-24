@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Virtual environments and local configuration
+.venv/
+venv/
+.env
+
+# Local databases and runtime files
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+*.log
+config/rss_sources.local.json
+
+# Editors and operating systems
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local Codex installation files
+/codex
+/codex-package-*.tar.gz

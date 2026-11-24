@@ -1,0 +1,38 @@
+[
+  {
+    "name": "CISA",
+    "url": "https://www.cisa.gov/rss.xml",
+    "homepage": "https://www.cisa.gov/",
+    "enabled": true,
+    "verification_status": "pending_network_check",
+    "max_articles": 10,
+    "delay_seconds": 0.5
+  },
+  {
+    "name": "The Hacker News",
+    "url": "https://feeds.feedburner.com/TheHackersNews",
+    "homepage": "https://thehackernews.com/",
+    "enabled": true,
+    "verification_status": "pending_network_check",
+    "max_articles": 10,
+    "delay_seconds": 0.5
+  },
+  {
+    "name": "BleepingComputer",
+    "url": "https://www.bleepingcomputer.com/feed/",
+    "homepage": "https://www.bleepingcomputer.com/",
+    "enabled": true,
+    "verification_status": "pending_network_check",
+    "max_articles": 10,
+    "delay_seconds": 0.5
+  },
+  {
+    "name": "Krebs on Security",
+    "url": "https://krebsonsecurity.com/feed/",
+    "homepage": "https://krebsonsecurity.com/",
+    "enabled": true,
+    "verification_status": "pending_network_check",
+    "max_articles": 10,
+    "delay_seconds": 0.5
+  }
+]
