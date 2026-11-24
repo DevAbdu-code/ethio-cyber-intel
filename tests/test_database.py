@@ -188,6 +188,48 @@ class DatabaseInitializationTests(unittest.TestCase):
         self.assertEqual(set(current["category"]), {"ransomware"})
         self.assertEqual(set(current["status"]), {"human_reviewed"})
 
+    def test_stage_five_migration_and_assessment_history_preserve_article_and_human_review(self):
+        from src.ethio_cyber_intel.database import (
+            assess_pending_articles, connect, insert_live_articles,
+            save_manual_severity_assessment, save_severity_assessment,
+        )
+        from src.ethio_cyber_intel.dashboard_data import load_current_severity_assessments
+        from src.ethio_cyber_intel.severity_assessment import assess_severity
+
+        initialize_database(self.db_path, seed_demo=False)
+        insert_live_articles([{
+            "title": "Article says a vulnerability could allow data exposure",
+            "url": "https://news.example.test/severity", "source": "Test source",
+            "language": "en", "summary": "Original summary", "content": "Original body",
+        }], self.db_path)
+        with connect(self.db_path) as connection:
+            article = dict(connection.execute("SELECT * FROM articles").fetchone())
+            tables = {row[0] for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )}
+        self.assertIn("severity_assessments", tables)
+        self.assertEqual(assess_pending_articles(self.db_path)["assessed"], 1)
+        first = load_current_severity_assessments(self.db_path).iloc[0]
+        self.assertEqual(first["severity"], "Medium")
+        save_manual_severity_assessment(
+            1, severity="Low", explanation="Reviewer rationale", evidence=[],
+            evidence_completeness={"known_fields": 1, "total_fields": 8}, db_path=self.db_path,
+        )
+        blocked = save_severity_assessment(1, assess_severity(article), self.db_path)
+        self.assertFalse(blocked["saved"])
+        self.assertEqual(assess_pending_articles(self.db_path)["assessed"], 0)
+        rows = load_current_severity_assessments(self.db_path)
+        self.assertEqual(rows.iloc[0]["severity"], "Low")
+        self.assertEqual(rows.iloc[0]["status"], "human_reviewed")
+        with connect(self.db_path) as connection:
+            after = dict(connection.execute("SELECT * FROM articles WHERE id=1").fetchone())
+            history_count = connection.execute(
+                "SELECT COUNT(*) FROM severity_assessments WHERE article_id=1"
+            ).fetchone()[0]
+        self.assertEqual(history_count, 2)
+        self.assertEqual((after["title"], after["url"], after["summary"], after["content"]),
+                         (article["title"], article["url"], article["summary"], article["content"]))
+
 
 if __name__ == "__main__":
     unittest.main()

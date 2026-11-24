@@ -36,3 +36,20 @@ def load_current_classifications(db_path=None) -> pd.DataFrame:
                ORDER BY r.article_id, l.category""",
             connection,
         )
+
+
+def load_current_severity_assessments(db_path=None) -> pd.DataFrame:
+    """Load the latest severity history row for each report."""
+    with connect(db_path) as connection:
+        return pd.read_sql_query(
+            """WITH latest AS (
+                   SELECT article_id, MAX(id) AS assessment_id
+                   FROM severity_assessments GROUP BY article_id
+               )
+               SELECT s.id AS assessment_id,s.article_id,s.severity,s.explanation,
+                      s.evidence_json,s.method,s.assessed_at,s.status,
+                      s.evidence_completeness_json,s.assessment_version
+               FROM latest x JOIN severity_assessments s ON s.id=x.assessment_id
+               ORDER BY s.article_id""",
+            connection,
+        )

@@ -15,9 +15,11 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from ethio_cyber_intel.article_extractor import ArticleExtractor  # noqa: E402
 from ethio_cyber_intel.config import seed_demo_enabled  # noqa: E402
-from ethio_cyber_intel.dashboard_data import load_articles, load_current_classifications  # noqa: E402
+from ethio_cyber_intel.dashboard_data import (  # noqa: E402
+    load_articles, load_current_classifications, load_current_severity_assessments,
+)
 from ethio_cyber_intel.database import (  # noqa: E402
-    classify_pending_articles, initialize_database, insert_live_articles,
+    assess_pending_articles, classify_pending_articles, initialize_database, insert_live_articles,
 )
 from ethio_cyber_intel.language_detection import MIN_CONFIDENCE  # noqa: E402
 from ethio_cyber_intel.rss_collector import collect_all  # noqa: E402
@@ -36,6 +38,7 @@ THREAT_NAMES = {
     "cyber_espionage": "Cyber espionage", "credential_theft": "Credential theft",
     "other": "Other cyber threat", "unknown": "Unknown",
 }
+SEVERITY_LEVELS = ("Critical", "High", "Medium", "Low", "Informational", "Unknown")
 
 
 def _attach_classifications(articles: pd.DataFrame, labels: pd.DataFrame) -> pd.DataFrame:
@@ -77,6 +80,47 @@ def _attach_classifications(articles: pd.DataFrame, labels: pd.DataFrame) -> pd.
     return result
 
 
+def _attach_severities(articles: pd.DataFrame, assessments: pd.DataFrame) -> pd.DataFrame:
+    """Attach latest severity decisions and audit details for display only."""
+    result = articles.copy()
+    if result.empty:
+        return result
+    result["severity"] = "Unknown"
+    result["severity_explanation"] = "No assessment recorded."
+    result["severity_evidence"] = ""
+    result["severity_method"] = "Not assessed"
+    result["severity_status"] = "unassessed"
+    result["evidence_completeness"] = "Not assessed"
+    if assessments.empty:
+        return result
+    import json
+    for _, row in assessments.iterrows():
+        indices = result.index[result["id"] == row["article_id"]]
+        if len(indices) == 0:
+            continue
+        idx = indices[0]
+        result.at[idx, "severity"] = row["severity"]
+        result.at[idx, "severity_explanation"] = row["explanation"]
+        result.at[idx, "severity_method"] = row["method"]
+        result.at[idx, "severity_status"] = row["status"]
+        try:
+            evidence = json.loads(row["evidence_json"] or "[]")
+            completeness = json.loads(row["evidence_completeness_json"] or "{}")
+        except (TypeError, ValueError):
+            evidence, completeness = [], {}
+        result.at[idx, "severity_evidence"] = "; ".join(
+            f"{item.get('type')}: {item.get('value')} [{item.get('evidentiary_status')}; {item.get('source_name')}; {item.get('source_url')}]"
+            for item in evidence
+        ) or "No severity evidence"
+        fields = completeness.get("fields", {})
+        missing = [name for name, known in fields.items() if not known]
+        result.at[idx, "evidence_completeness"] = (
+            f"{completeness.get('known_fields', 0)}/{completeness.get('total_fields', 0)} factors; "
+            f"missing: {', '.join(missing) if missing else 'none'}"
+        )
+    return result
+
+
 def _refresh(db_path: Path) -> None:
     sources = load_sources(enabled_only=True)
     if not sources:
@@ -89,6 +133,7 @@ def _refresh(db_path: Path) -> None:
             all_articles = [article for result in results for article in result["articles"]]
             stats = insert_live_articles(all_articles, db_path)
             classification_stats = classify_pending_articles(db_path)
+            severity_stats = assess_pending_articles(db_path)
             st.session_state["source_results"] = results
             st.session_state["last_collection_stats"] = stats
             st.success(
@@ -99,6 +144,10 @@ def _refresh(db_path: Path) -> None:
             st.info(
                 f"Preliminary keyword classification: {classification_stats['classified']} labeled, "
                 f"{classification_stats['unknown']} unknown. These labels are not human verified."
+            )
+            st.info(
+                f"Preliminary severity assessment: {severity_stats['assessed']} prioritized, "
+                f"{severity_stats['unknown']} unknown."
             )
         except Exception as exc:
             logger.exception("RSS refresh failed")
@@ -114,6 +163,7 @@ def main() -> None:
         db_path = initialize_database(seed_demo=seed_demo_enabled())
         articles = load_articles(db_path)
         labels = load_current_classifications(db_path)
+        severity_rows = load_current_severity_assessments(db_path)
     except Exception as exc:
         logger.exception("Dashboard could not load the local database")
         st.error(f"The local database could not be loaded: {exc}")
@@ -127,6 +177,7 @@ def main() -> None:
         try:
             articles = load_articles(db_path)
             labels = load_current_classifications(db_path)
+            severity_rows = load_current_severity_assessments(db_path)
         except Exception as exc:
             logger.exception("Could not reload reports after collection")
             st.error(f"Reports were collected but could not be reloaded: {exc}")
@@ -142,7 +193,19 @@ def main() -> None:
             logger.exception("Classification failed")
             st.error(f"Could not classify pending reports: {exc}")
 
+    if st.button("⚖️ Assess pending severity"):
+        try:
+            with st.spinner("Assessing available evidence conservatively…"):
+                counts = assess_pending_articles(db_path)
+            st.success(f"Assessed {counts['assessed']} reports; {counts['unknown']} remain unknown.")
+            articles = load_articles(db_path)
+            severity_rows = load_current_severity_assessments(db_path)
+        except Exception as exc:
+            logger.exception("Severity assessment failed")
+            st.error(f"Could not assess report severity: {exc}")
+
     articles = _attach_classifications(articles, labels)
+    articles = _attach_severities(articles, severity_rows)
 
     if st.session_state.get("source_results") is not None:
         rows = []
@@ -174,6 +237,8 @@ def main() -> None:
         | articles["classification_categories"].eq(THREAT_NAMES["unknown"])
     ).sum()) if not articles.empty else 0
     st.metric("Unknown or unclassified reports", unknown_classifications)
+    unknown_severity = int((articles["severity"] == "Unknown").sum()) if not articles.empty else 0
+    st.metric("Unknown severity", unknown_severity)
 
     language_metrics = st.columns(5)
     for column, code in zip(language_metrics, ("en", "am", "om", "und", "mul")):
@@ -206,6 +271,8 @@ def main() -> None:
         threat_values = sorted({category for value in articles["classification_categories"]
                                 for category in value.split(", ")})
         selected_threats = st.sidebar.multiselect("Threat category", threat_values, default=threat_values)
+        severity_values = [level for level in SEVERITY_LEVELS if level in set(articles["severity"])]
+        selected_severities = st.sidebar.multiselect("Severity", severity_values, default=severity_values)
         filtered = articles[
             articles["source"].isin(selected_sources)
             & articles["is_demo"].map({1: "DEMO DATA", 0: "LIVE"}).isin(record_types)
@@ -213,6 +280,7 @@ def main() -> None:
             & articles["classification_categories"].apply(
                 lambda value: any(item in selected_threats for item in value.split(", "))
             )
+            & articles["severity"].isin(selected_severities)
         ].copy()
         uncertain = filtered[
             (filtered["language"] == "und")
@@ -279,6 +347,49 @@ def main() -> None:
         else:
             st.info("No classified reports available for comparison.")
 
+    severity_left, severity_right = st.columns(2)
+    with severity_left:
+        st.subheader("Severity distribution")
+        if filtered.empty:
+            st.info("No reports to chart.")
+        else:
+            severity_counts = filtered["severity"].value_counts().reindex(SEVERITY_LEVELS, fill_value=0)
+            severity_plot = severity_counts.rename_axis("Severity").reset_index(name="Reports")
+            st.plotly_chart(px.bar(severity_plot, x="Severity", y="Reports", color="Severity"), use_container_width=True)
+    with severity_right:
+        st.subheader("Severity by language")
+        if filtered.empty:
+            st.info("No reports to compare.")
+        else:
+            severity_language = filtered.assign(
+                Language=filtered["language"].map(LANGUAGE_NAMES)
+            ).groupby(["Language", "severity"]).size().reset_index(name="Reports")
+            st.plotly_chart(px.bar(severity_language, x="Language", y="Reports", color="severity", barmode="stack"), use_container_width=True)
+
+    st.subheader("Severity by threat category")
+    severity_category_rows = [
+        {"Severity": row["severity"], "Threat category": category}
+        for _, row in filtered.iterrows()
+        if row["classification_categories"] != "Unclassified"
+        for category in row["classification_categories"].split(", ")
+    ] if not filtered.empty else []
+    if severity_category_rows:
+        grouped = pd.DataFrame(severity_category_rows).groupby(["Threat category", "Severity"]).size().reset_index(name="Reports")
+        st.plotly_chart(px.bar(grouped, x="Threat category", y="Reports", color="Severity", barmode="stack"), use_container_width=True)
+    else:
+        st.info("No classified reports available for severity comparison.")
+
+    st.subheader("Critical and High priority reports")
+    priority = filtered[filtered["severity"].isin(["Critical", "High"])] if not filtered.empty else filtered
+    if priority.empty:
+        st.info("No reports currently meet the Critical or High evidence rules.")
+    else:
+        st.dataframe(priority[["title", "source", "published_at", "severity", "severity_status", "severity_explanation", "evidence_completeness", "url"]].rename(columns={
+            "title": "Title", "source": "Source", "published_at": "Published", "severity": "Severity",
+            "severity_status": "Assessment status", "severity_explanation": "Assessment explanation",
+            "evidence_completeness": "Evidence completeness", "url": "Original URL",
+        }), use_container_width=True, hide_index=True)
+
     st.subheader("Latest collected articles")
     live = filtered[filtered["is_demo"] == 0].sort_values("fetched_at", ascending=False) if not filtered.empty else filtered
     if live.empty:
@@ -294,8 +405,11 @@ def main() -> None:
             "classification_categories": "Threat categories", "classification_confidence": "Category confidence (heuristic)",
             "classification_evidence": "Supporting evidence", "classification_method": "Classification method",
             "classification_status": "Classification status",
+            "severity": "Severity", "severity_status": "Severity assessment status",
+            "severity_explanation": "Severity explanation", "severity_evidence": "Severity supporting evidence",
+            "severity_method": "Severity method", "evidence_completeness": "Evidence completeness",
         })
-        st.dataframe(live_display[["Title", "Source", "Published", "Collected at", "Language", "Confidence", "Detection method", "Threat categories", "Category confidence (heuristic)", "Supporting evidence", "Classification method", "Classification status", "Report status", "Description", "Original URL"]], use_container_width=True, hide_index=True)
+        st.dataframe(live_display[["Title", "Source", "Published", "Collected at", "Language", "Confidence", "Detection method", "Threat categories", "Category confidence (heuristic)", "Supporting evidence", "Classification method", "Classification status", "Severity", "Severity assessment status", "Severity explanation", "Severity supporting evidence", "Severity method", "Evidence completeness", "Report status", "Description", "Original URL"]], use_container_width=True, hide_index=True)
 
     demo = filtered[filtered["is_demo"] == 1] if not filtered.empty else filtered
     if not demo.empty:
@@ -307,11 +421,14 @@ def main() -> None:
             "classification_categories": "Threat categories", "classification_confidence": "Category confidence (heuristic)",
             "classification_evidence": "Supporting evidence", "classification_method": "Classification method",
             "classification_status": "Classification status",
+            "severity": "Severity", "severity_status": "Severity assessment status",
+            "severity_explanation": "Severity explanation", "severity_evidence": "Severity supporting evidence",
+            "severity_method": "Severity method", "evidence_completeness": "Evidence completeness",
         })
         demo_display["Language"] = demo_display["Language"].map(LANGUAGE_NAMES)
-        st.dataframe(demo_display[["Title", "Source", "Published", "Language", "Confidence", "Detection method", "Threat categories", "Category confidence (heuristic)", "Supporting evidence", "Classification method", "Classification status", "Original URL"]], use_container_width=True, hide_index=True)
+        st.dataframe(demo_display[["Title", "Source", "Published", "Language", "Confidence", "Detection method", "Threat categories", "Category confidence (heuristic)", "Supporting evidence", "Classification method", "Classification status", "Severity", "Severity assessment status", "Severity explanation", "Severity supporting evidence", "Severity method", "Evidence completeness", "Original URL"]], use_container_width=True, hide_index=True)
 
-    st.caption("Collected reports are unverified source material. Automated keyword categories are preliminary labels, not verified advisories or calibrated probabilities; human review is authoritative.")
+    st.caption("Collected reports are unverified source material. Threat categories and severity assessments are separate. Automated severity is preliminary; only documented evidence marked verified is treated as verified, and human review is authoritative.")
 
 
 if __name__ == "__main__":

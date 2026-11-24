@@ -72,6 +72,27 @@ CREATE TABLE IF NOT EXISTS threat_classification_labels (
 CREATE INDEX IF NOT EXISTS idx_threat_labels_category ON threat_classification_labels(category);
 """
 
+SEVERITY_SCHEMA = """
+CREATE TABLE IF NOT EXISTS severity_assessments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    article_id INTEGER NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
+    severity TEXT NOT NULL CHECK (severity IN ('Critical','High','Medium','Low','Informational','Unknown')),
+    explanation TEXT NOT NULL,
+    evidence_json TEXT NOT NULL,
+    method TEXT NOT NULL,
+    assessed_at TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN (
+        'externally_supported','preliminary_reported_claim','insufficient_evidence',
+        'conflicting_evidence','human_reviewed'
+    )),
+    evidence_completeness_json TEXT NOT NULL,
+    assessment_version TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_severity_article_latest
+    ON severity_assessments(article_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_severity_level ON severity_assessments(severity);
+"""
+
 DEMO_ARTICLES = (
     {
         "title": "DEMO DATA: Example phishing awareness notice",
@@ -134,6 +155,7 @@ def initialize_database(
             _migrate_articles_table(connection)
             connection.executescript(SCHEMA)
             _initialize_classification_schema(connection)
+            _initialize_severity_schema(connection)
             count = connection.execute("SELECT COUNT(*) FROM articles").fetchone()[0]
             if seed_demo and count == 0:
                 _insert_demo_rows(connection, DEMO_ARTICLES)
@@ -155,6 +177,19 @@ def _initialize_classification_schema(connection: sqlite3.Connection) -> None:
     connection.execute("BEGIN IMMEDIATE")
     try:
         for statement in CLASSIFICATION_SCHEMA.split(";"):
+            if statement.strip():
+                connection.execute(statement)
+        connection.commit()
+    except sqlite3.Error:
+        connection.rollback()
+        raise
+
+
+def _initialize_severity_schema(connection: sqlite3.Connection) -> None:
+    """Create the additive severity history schema transactionally."""
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        for statement in SEVERITY_SCHEMA.split(";"):
             if statement.strip():
                 connection.execute(statement)
         connection.commit()
@@ -394,4 +429,89 @@ def classify_pending_articles(db_path: str | Path | None = None) -> dict[str, in
         return result
     except sqlite3.Error:
         logger.exception("Could not classify pending articles")
+        raise
+
+
+def save_severity_assessment(
+    article_id: int, assessment, db_path: str | Path | None = None,
+) -> dict[str, int | bool | str]:
+    """Append an automated assessment unless any human assessment exists."""
+    result = assessment.as_dict() if hasattr(assessment, "as_dict") else dict(assessment)
+    try:
+        with connect(db_path) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if not connection.execute("SELECT 1 FROM articles WHERE id=?", (article_id,)).fetchone():
+                raise ValueError(f"Article {article_id} does not exist")
+            if connection.execute(
+                "SELECT 1 FROM severity_assessments WHERE article_id=? AND status='human_reviewed' LIMIT 1",
+                (article_id,),
+            ).fetchone():
+                return {"saved": False, "reason": "human_review_preserved"}
+            cursor = connection.execute(
+                """INSERT INTO severity_assessments
+                   (article_id,severity,explanation,evidence_json,method,assessed_at,status,
+                    evidence_completeness_json,assessment_version)
+                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                (article_id, result["severity"], result["explanation"],
+                 json.dumps(result.get("evidence", []), ensure_ascii=False), result["method"],
+                 result["assessed_at"], result["status"],
+                 json.dumps(result.get("evidence_completeness", {}), ensure_ascii=False),
+                 result.get("version", "1.0")),
+            )
+            return {"saved": True, "assessment_id": int(cursor.lastrowid), "severity": result["severity"]}
+    except sqlite3.Error:
+        logger.exception("Could not store severity assessment for article %s", article_id)
+        raise
+
+
+def save_manual_severity_assessment(
+    article_id: int, *, severity: str, explanation: str, evidence: Iterable[dict],
+    evidence_completeness: dict, db_path: str | Path | None = None,
+) -> int:
+    """Append a reviewed severity decision without deleting prior assessments."""
+    try:
+        with connect(db_path) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if not connection.execute("SELECT 1 FROM articles WHERE id=?", (article_id,)).fetchone():
+                raise ValueError(f"Article {article_id} does not exist")
+            cursor = connection.execute(
+                """INSERT INTO severity_assessments
+                   (article_id,severity,explanation,evidence_json,method,assessed_at,status,
+                    evidence_completeness_json,assessment_version)
+                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                (article_id, severity, explanation, json.dumps(list(evidence), ensure_ascii=False),
+                 "human_review", datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                 "human_reviewed", json.dumps(evidence_completeness, ensure_ascii=False), "manual"),
+            )
+            return int(cursor.lastrowid)
+    except sqlite3.Error:
+        logger.exception("Could not save manual severity review for article %s", article_id)
+        raise
+
+
+def assess_pending_articles(db_path: str | Path | None = None) -> dict[str, int]:
+    """Assess articles with no existing severity history; keep all prior runs."""
+    from .severity_assessment import assess_severity
+
+    try:
+        with connect(db_path) as connection:
+            rows = connection.execute(
+                """SELECT a.id,a.title,a.source,a.url,a.published_at,a.summary,a.content
+                   FROM articles a WHERE NOT EXISTS
+                   (SELECT 1 FROM severity_assessments s WHERE s.article_id=a.id)
+                   ORDER BY a.id"""
+            ).fetchall()
+        counts = {"assessed": 0, "unknown": 0, "skipped": 0}
+        for row in rows:
+            assessment = assess_severity(dict(row))
+            saved = save_severity_assessment(int(row["id"]), assessment, db_path)
+            if not saved.get("saved"):
+                counts["skipped"] += 1
+            elif assessment.severity == "Unknown":
+                counts["unknown"] += 1
+            else:
+                counts["assessed"] += 1
+        return counts
+    except sqlite3.Error:
+        logger.exception("Could not assess pending article severity")
         raise

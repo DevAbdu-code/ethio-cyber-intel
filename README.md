@@ -1,8 +1,8 @@
 # ETHIO-CYBER INTEL
 
-A CPU-friendly research application for trilingual cyber threat intelligence aggregation and analysis. Stage 1 provides the Streamlit dashboard and SQLite store; Stage 2 adds configurable RSS collection and careful article extraction; Stage 3 adds conservative language detection; Stage 4 adds preliminary, explainable multi-label threat categorization.
+A CPU-friendly research application for trilingual cyber threat intelligence aggregation and analysis. Stage 1 provides the Streamlit dashboard and SQLite store; Stage 2 adds configurable RSS collection and careful article extraction; Stage 3 adds conservative language detection; Stage 4 adds preliminary, explainable multi-label threat categorization; Stage 5 adds conservative evidence-based severity triage.
 
-Collected reports are source-attributed but are not independently verified advisories. Automated threat labels are preliminary rule matches, not verified intelligence or calibrated probabilities. No severity scoring or incident correlation is performed.
+Collected reports are source-attributed but are not independently verified advisories. Automated threat labels and severity assessments are preliminary unless backed by documented, retrieved external evidence or human review. Their rule outputs are not calibrated probabilities. Incident correlation is not performed.
 
 ## Requirements and installation
 
@@ -93,6 +93,36 @@ python scripts/evaluate_threat_classifier.py
 
 Small or convenience samples are exploratory and cannot establish real-world accuracy or parity among languages.
 
+## Stage 5: evidence-based severity assessment
+
+Severity is a prioritization dimension separate from Stage 4 threat categories. A report may be classified as ransomware while its severity is `Unknown`; a vulnerability category alone does not imply `Critical`, and a ransomware mention does not establish confirmed impact.
+
+Supported levels are `Critical`, `High`, `Medium`, `Low`, `Informational`, and `Unknown`. `src/ethio_cyber_intel/severity_assessment.py` uses a documented deterministic policy rather than a learned model or probability:
+
+- An article-reported CVSS score maps to the matching qualitative band but remains a `reported_claim`, with an explicit unverified explanation. A CVE identifier alone never raises severity.
+- CVSS v3.x/v4 qualitative thresholds follow FIRST: 0.0 maps to Informational/None, 0.1–3.9 Low, 4.0–6.9 Medium, 7.0–8.9 High, and 9.0–10.0 Critical. CVSS describes vulnerability severity and should not be treated alone as full incident risk. See the [FIRST CVSS v3.1 specification](https://www.first.org/cvss/v3.1/specification-document) and [user guide](https://www.first.org/cvss/v3.1/user-guide).
+- `High` may be assigned when an explicitly documented external source confirms exploitation and at least one impact, or provides a verified High CVSS score. `Critical` requires a verified Critical CVSS score; textual incident claims alone do not qualify.
+- Confirmed exploitation without a confirmed impact, or a confirmed impact without known scale, is Medium. Article-reported exploitation, a reported proof of concept, or a reported/potential impact can also create Medium review priority, but the result remains preliminary and the claims are not independently verified.
+- `Low` requires a verified or source-reported Low CVSS score. `Informational` requires an explicit informational/awareness notice without stronger evidence. Missing or insufficient evidence stays `Unknown`, never Low by default. Contradictory evidence returns Unknown with a conflict explanation.
+
+Each assessment stores its explanation, evidence items, source attribution, article publication date and original URL, evidence completeness, method/version, status, and UTC timestamp. Extracted CVEs, CVSS values, product mentions, exploitation phrases, and impact phrases are attributed to the original article as reported claims. The classifier does not establish that a CVE exists, that a score is current, that a product is affected, or that a reported impact occurred.
+
+Current text-pattern extraction is English-focused; it does not yet provide validated Amharic or Afaan Oromo exploitation/impact phrase coverage. The severity framework accepts language-neutral structured external evidence for any report, but no equal performance across languages is claimed. Language-specific evaluation is required before operational use.
+
+No external CVE or exploitation lookup is currently performed, and no paid API is required. `assess_severity(article, external_evidence=...)` accepts future enrichment records only when a caller supplies `verification_status: "verified"`, a source name, source URL, and retrieval time. The caller must actually retrieve and check that source before marking it verified; merely adding a URL is insufficient. The current dashboard assessment action supplies article evidence only, so it cannot produce externally verified findings. Network failures and terms/rate limits remain the responsibility of any future permitted source adapter.
+
+The database keeps append-only rows in `severity_assessments`; it preserves earlier automated assessments and does not replace an article's text or Stage 4 labels. Human-reviewed assessments become the current record and block later automated assessments for that article. The dashboard has severity filters and charts, a Critical/High priority table, explanations, source evidence, and a completeness summary. Automated assessment status is shown separately from the severity level.
+
+### Stage 5 evaluation
+
+The separate [`evaluation/severity_eval.jsonl`](evaluation/severity_eval.jsonl) dataset is currently empty. Thus agreement, per-class precision/recall, macro F1, confusion matrix counts, and per-language agreement are **unavailable**. Synthetic tests do not count as research evaluation. To add examples, use the schema and provenance instructions in [`evaluation/severity_evaluation.md`](evaluation/severity_evaluation.md), with a manually reviewed `human_severity`, language, source note, and `manually_reviewed: true`. Run:
+
+```bash
+python scripts/evaluate_severity.py
+```
+
+Small convenience samples are exploratory and cannot establish real-world severity performance or language parity.
+
 ## Tests and compilation
 
 ```bash
@@ -121,8 +151,9 @@ Database initialization migrates the existing articles table transactionally, pr
 - Exact URL/content fingerprints are checked for duplicates; paraphrase-level duplicates are not detected.
 - Afaan Oromo cue coverage is small and may miss valid Oromo text or confuse overlapping vocabulary. Manually review uncertain labels and evaluate with diverse Oromo examples.
 - Stage 4 classification is a hand-built phrase baseline, not a learned classifier. Coverage is incomplete, scores are uncalibrated, and the current threat evaluation dataset is empty.
+- Stage 5 severity is a conservative report-evidence triage policy, not organizational risk scoring, incident validation, or calibrated prediction. Current dashboard assessments use article text only; no external source has been queried. Severity evaluation data is empty.
 - The current evaluation data is synthetic and too small to support research conclusions. Build a permissioned, manually reviewed corpus before reporting accuracy as a real-world result.
-- Threat classification, cross-language incident correlation, multilingual summaries, and severity scoring are not part of this stage.
+- Cross-language incident correlation and multilingual summaries are not part of this stage.
 
 ## Project layout
 
@@ -138,9 +169,12 @@ src/ethio_cyber_intel/
   database.py                           Schema, migrations, and inserts
   language_detection.py                 CPU-only language detection heuristics
   threat_classification.py              Evidence-producing multilingual rules baseline
+  severity_assessment.py               Evidence-led severity triage rules
   rss_collector.py                      RSS fetching and normalization
   rss_sources.py                        RSS configuration validation
 tests/                                  Offline tests and separate synthetic fixtures
 evaluation/threat_eval.jsonl            Empty, manually reviewed research evaluation set
 scripts/evaluate_threat_classifier.py   Multilabel evaluation metrics
+evaluation/severity_eval.jsonl         Empty, manually reviewed severity evaluation set
+scripts/evaluate_severity.py             Severity agreement and classification metrics
 ```
