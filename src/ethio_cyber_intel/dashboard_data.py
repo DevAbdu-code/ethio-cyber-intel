@@ -53,3 +53,30 @@ def load_current_severity_assessments(db_path=None) -> pd.DataFrame:
                ORDER BY s.article_id""",
             connection,
         )
+
+
+def load_current_correlations(db_path=None) -> pd.DataFrame:
+    """Load latest relationship decision plus source-attributed article details."""
+    with connect(db_path) as connection:
+        return pd.read_sql_query(
+            """WITH latest AS (
+                   SELECT pair_id, MAX(id) AS assessment_id
+                   FROM correlation_assessments GROUP BY pair_id
+               )
+               SELECT p.id AS pair_id,p.article_id_a,p.article_id_b,
+                      c.score,c.matching_identifiers_json,c.shared_entities_json,
+                      c.shared_terms_json,c.similarity_methods_json,c.supporting_evidence_json,
+                      c.language_a,c.language_b,c.language_pair,c.explanation,
+                      c.correlated_at,c.status,c.reviewer_note,
+                      a.title AS title_a,a.source AS source_a,a.url AS url_a,
+                      a.published_at AS published_a,a.language AS article_language_a,
+                      b.title AS title_b,b.source AS source_b,b.url AS url_b,
+                      b.published_at AS published_b,b.language AS article_language_b
+               FROM latest x
+               JOIN correlation_assessments c ON c.id=x.assessment_id
+               JOIN correlation_pairs p ON p.id=c.pair_id
+               JOIN articles a ON a.id=p.article_id_a
+               JOIN articles b ON b.id=p.article_id_b
+               ORDER BY CASE c.status WHEN 'Candidate' THEN 0 ELSE 1 END,c.score DESC,c.id DESC""",
+            connection,
+        )

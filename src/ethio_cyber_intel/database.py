@@ -93,6 +93,40 @@ CREATE INDEX IF NOT EXISTS idx_severity_article_latest
 CREATE INDEX IF NOT EXISTS idx_severity_level ON severity_assessments(severity);
 """
 
+CORRELATION_SCHEMA = """
+CREATE TABLE IF NOT EXISTS correlation_pairs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    article_id_a INTEGER NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
+    article_id_b INTEGER NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL,
+    CHECK (article_id_a < article_id_b),
+    UNIQUE (article_id_a, article_id_b)
+);
+CREATE TABLE IF NOT EXISTS correlation_assessments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    pair_id INTEGER NOT NULL REFERENCES correlation_pairs(id) ON DELETE CASCADE,
+    score REAL NOT NULL CHECK (score >= 0 AND score <= 1),
+    matching_identifiers_json TEXT NOT NULL,
+    shared_entities_json TEXT NOT NULL,
+    shared_terms_json TEXT NOT NULL,
+    similarity_methods_json TEXT NOT NULL,
+    supporting_evidence_json TEXT NOT NULL,
+    language_a TEXT NOT NULL,
+    language_b TEXT NOT NULL,
+    language_pair TEXT NOT NULL,
+    explanation TEXT NOT NULL,
+    correlated_at TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN (
+        'Candidate','Human confirmed','Human rejected','Insufficient evidence'
+    )),
+    reviewer_note TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_correlation_assessment_latest
+    ON correlation_assessments(pair_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_correlation_status
+    ON correlation_assessments(status);
+"""
+
 DEMO_ARTICLES = (
     {
         "title": "DEMO DATA: Example phishing awareness notice",
@@ -156,6 +190,7 @@ def initialize_database(
             connection.executescript(SCHEMA)
             _initialize_classification_schema(connection)
             _initialize_severity_schema(connection)
+            _initialize_correlation_schema(connection)
             count = connection.execute("SELECT COUNT(*) FROM articles").fetchone()[0]
             if seed_demo and count == 0:
                 _insert_demo_rows(connection, DEMO_ARTICLES)
@@ -190,6 +225,19 @@ def _initialize_severity_schema(connection: sqlite3.Connection) -> None:
     connection.execute("BEGIN IMMEDIATE")
     try:
         for statement in SEVERITY_SCHEMA.split(";"):
+            if statement.strip():
+                connection.execute(statement)
+        connection.commit()
+    except sqlite3.Error:
+        connection.rollback()
+        raise
+
+
+def _initialize_correlation_schema(connection: sqlite3.Connection) -> None:
+    """Create correlation relationships and append-only decisions transactionally."""
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        for statement in CORRELATION_SCHEMA.split(";"):
             if statement.strip():
                 connection.execute(statement)
         connection.commit()
@@ -514,4 +562,149 @@ def assess_pending_articles(db_path: str | Path | None = None) -> dict[str, int]
         return counts
     except sqlite3.Error:
         logger.exception("Could not assess pending article severity")
+        raise
+
+
+def save_correlation(result, db_path: str | Path | None = None) -> dict[str, int | bool | str]:
+    """Append a candidate assessment without replacing any human decision."""
+    value = result.as_dict() if hasattr(result, "as_dict") else dict(result)
+    if value.get("status") not in {"Candidate", "Insufficient evidence"}:
+        raise ValueError("Automated correlation status must be Candidate or Insufficient evidence")
+    article_a, article_b = value.get("article_id_a"), value.get("article_id_b")
+    if article_a is None or article_b is None or int(article_a) == int(article_b):
+        raise ValueError("Correlation requires two distinct persisted article IDs")
+    first, second = sorted((int(article_a), int(article_b)))
+    try:
+        with connect(db_path) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            for article_id in (first, second):
+                if not connection.execute("SELECT 1 FROM articles WHERE id=?", (article_id,)).fetchone():
+                    raise ValueError(f"Article {article_id} does not exist")
+            pair = connection.execute(
+                "SELECT id FROM correlation_pairs WHERE article_id_a=? AND article_id_b=?",
+                (first, second),
+            ).fetchone()
+            if pair is None:
+                cursor = connection.execute(
+                    "INSERT INTO correlation_pairs (article_id_a,article_id_b,created_at) VALUES (?,?,?)",
+                    (first, second, value["correlated_at"]),
+                )
+                pair_id = int(cursor.lastrowid)
+            else:
+                pair_id = int(pair["id"])
+            latest = connection.execute(
+                "SELECT status FROM correlation_assessments WHERE pair_id=? ORDER BY id DESC LIMIT 1",
+                (pair_id,),
+            ).fetchone()
+            if latest and latest["status"] in {"Human confirmed", "Human rejected"}:
+                return {"saved": False, "reason": "human_review_preserved", "pair_id": pair_id}
+            if latest and latest["status"] == value["status"] == "Candidate":
+                return {"saved": False, "reason": "candidate_already_recorded", "pair_id": pair_id}
+            cursor = connection.execute(
+                """INSERT INTO correlation_assessments
+                   (pair_id,score,matching_identifiers_json,shared_entities_json,shared_terms_json,
+                    similarity_methods_json,supporting_evidence_json,language_a,language_b,language_pair,
+                    explanation,correlated_at,status)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (pair_id, value["score"],
+                 json.dumps(value.get("matching_identifiers", []), ensure_ascii=False),
+                 json.dumps(value.get("shared_entities", []), ensure_ascii=False),
+                 json.dumps(value.get("shared_terms", []), ensure_ascii=False),
+                 json.dumps(value.get("similarity_methods", []), ensure_ascii=False),
+                 json.dumps(value.get("supporting_evidence", []), ensure_ascii=False),
+                 value["language_a"], value["language_b"], value["language_pair"],
+                 value["explanation"], value["correlated_at"], value["status"]),
+            )
+            return {"saved": True, "assessment_id": int(cursor.lastrowid), "pair_id": pair_id}
+    except sqlite3.Error:
+        logger.exception("Could not store correlation assessment for article pair %s/%s", article_a, article_b)
+        raise
+
+
+def save_manual_correlation(
+    article_id_a: int, article_id_b: int, *, decision: str, reviewer_note: str = "",
+    db_path: str | Path | None = None,
+) -> int:
+    """Append a human-confirmed/rejected decision to a relationship history."""
+    if decision not in {"Human confirmed", "Human rejected"}:
+        raise ValueError("Human decision must be Human confirmed or Human rejected")
+    first, second = sorted((int(article_id_a), int(article_id_b)))
+    if first == second:
+        raise ValueError("A report cannot be correlated with itself")
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    try:
+        with connect(db_path) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            for article_id in (first, second):
+                if not connection.execute("SELECT 1 FROM articles WHERE id=?", (article_id,)).fetchone():
+                    raise ValueError(f"Article {article_id} does not exist")
+            pair = connection.execute(
+                "SELECT id FROM correlation_pairs WHERE article_id_a=? AND article_id_b=?",
+                (first, second),
+            ).fetchone()
+            if pair is None:
+                pair_id = int(connection.execute(
+                    "INSERT INTO correlation_pairs (article_id_a,article_id_b,created_at) VALUES (?,?,?)",
+                    (first, second, now),
+                ).lastrowid)
+            else:
+                pair_id = int(pair["id"])
+            previous = connection.execute(
+                "SELECT * FROM correlation_assessments WHERE pair_id=? ORDER BY id DESC LIMIT 1",
+                (pair_id,),
+            ).fetchone()
+            prior_values = (
+                (previous["score"], previous["matching_identifiers_json"], previous["shared_entities_json"],
+                 previous["shared_terms_json"], previous["similarity_methods_json"],
+                 previous["supporting_evidence_json"], previous["language_a"], previous["language_b"],
+                 previous["language_pair"], previous["explanation"] + f" Human review decision: {decision}.")
+                if previous else
+                (0, "[]", "[]", "[]", "[]", "[]", "und", "und", "und ↔ und",
+                 f"Human review decision: {decision}.")
+            )
+            cursor = connection.execute(
+                """INSERT INTO correlation_assessments
+                   (pair_id,score,matching_identifiers_json,shared_entities_json,shared_terms_json,
+                    similarity_methods_json,supporting_evidence_json,language_a,language_b,language_pair,
+                    explanation,correlated_at,status,reviewer_note)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (pair_id, *prior_values, now, decision, reviewer_note),
+            )
+            return int(cursor.lastrowid)
+    except sqlite3.Error:
+        logger.exception("Could not record human correlation decision for %s/%s", first, second)
+        raise
+
+
+def correlate_pending_articles(
+    db_path: str | Path | None = None, *, article_limit: int = 300,
+) -> dict[str, int]:
+    """Compare a bounded recent article set; persist candidates only."""
+    from .correlation import correlate_pair
+
+    try:
+        with connect(db_path) as connection:
+            articles = [dict(row) for row in connection.execute(
+                """SELECT id,title,source,url,published_at,language,summary,content
+                   FROM articles WHERE is_demo=0
+                   ORDER BY COALESCE(published_at,fetched_at) DESC,id DESC LIMIT ?""",
+                (article_limit,),
+            ).fetchall()]
+        counts = {"compared": 0, "candidates": 0, "insufficient": 0, "saved": 0, "skipped": 0}
+        for left_index, article_a in enumerate(articles):
+            for article_b in articles[left_index + 1:]:
+                counts["compared"] += 1
+                result = correlate_pair(article_a, article_b)
+                if result.status != "Candidate":
+                    counts["insufficient"] += 1
+                    continue
+                counts["candidates"] += 1
+                saved = save_correlation(result, db_path)
+                if saved.get("saved"):
+                    counts["saved"] += 1
+                else:
+                    counts["skipped"] += 1
+        return counts
+    except sqlite3.Error:
+        logger.exception("Could not correlate article pairs")
         raise

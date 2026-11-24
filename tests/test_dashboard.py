@@ -33,3 +33,27 @@ def test_dashboard_assesses_pending_severity(tmp_path, monkeypatch):
     button = next(button for button in result.button if button.label == "⚖️ Assess pending severity")
     button.click().run()
     assert not result.exception
+
+
+def test_dashboard_correlates_and_human_confirms_candidate(tmp_path, monkeypatch):
+    from src.ethio_cyber_intel.database import initialize_database, insert_live_articles
+
+    db_path = tmp_path / "correlation.sqlite"
+    initialize_database(db_path, seed_demo=False)
+    insert_live_articles([
+        {"title": "CVE-2026-99112 exposure report", "url": "https://example.test/en",
+         "source": "Example EN", "language": "en"},
+        {"title": "CVE-2026-99112 ሪፖርት", "url": "https://example.test/am",
+         "source": "Example AM", "language": "am"},
+    ], db_path)
+    monkeypatch.setenv("ETHIO_CYBER_DB_PATH", str(db_path))
+    app_path = Path(__file__).resolve().parents[1] / "app.py"
+    result = AppTest.from_file(str(app_path)).run()
+    action = next(button for button in result.button if button.label == "🔗 Correlate collected reports")
+    result = action.click().run()
+    assert not result.exception
+    assert any("Candidate relationships" == metric.label and metric.value == "1" for metric in result.metric)
+    confirm = next(button for button in result.button if button.label == "Confirm related reports")
+    result = confirm.click().run()
+    assert not result.exception
+    assert any("Human confirmed" == metric.label and metric.value == "1" for metric in result.metric)

@@ -1,8 +1,8 @@
 # ETHIO-CYBER INTEL
 
-A CPU-friendly research application for trilingual cyber threat intelligence aggregation and analysis. Stage 1 provides the Streamlit dashboard and SQLite store; Stage 2 adds configurable RSS collection and careful article extraction; Stage 3 adds conservative language detection; Stage 4 adds preliminary, explainable multi-label threat categorization; Stage 5 adds conservative evidence-based severity triage.
+A CPU-friendly research application for trilingual cyber threat intelligence aggregation and analysis. Stage 1 provides the Streamlit dashboard and SQLite store; Stage 2 adds configurable RSS collection and careful article extraction; Stage 3 adds conservative language detection; Stage 4 adds preliminary, explainable multi-label threat categorization; Stage 5 adds conservative evidence-based severity triage; Stage 6 adds candidate relationship discovery across reports.
 
-Collected reports are source-attributed but are not independently verified advisories. Automated threat labels and severity assessments are preliminary unless backed by documented, retrieved external evidence or human review. Their rule outputs are not calibrated probabilities. Incident correlation is not performed.
+Collected reports are source-attributed but are not independently verified advisories. Automated threat labels, severity assessments, and correlation candidates are preliminary unless human reviewed. Their rule scores are not calibrated probabilities. Candidate relationships never prove that reports describe the same incident or share an actor.
 
 ## Requirements and installation
 
@@ -123,6 +123,28 @@ python scripts/evaluate_severity.py
 
 Small convenience samples are exploratory and cannot establish real-world severity performance or language parity.
 
+## Stage 6: cross-language report correlation
+
+The correlation engine compares articles in English (`en`), Amharic (`am`), and Afaan Oromo (`om`). Supported cross-language pairs are English–Amharic, English–Afaan Oromo, and Amharic–Afaan Oromo. `mul` and `und` articles can be compared, but do not receive the explicit cross-language candidate path unless a strong identifier/entity matches; they are not included in the three named language-pair evaluation groups.
+
+`src/ethio_cyber_intel/correlation.py` extracts normalized CVE identifiers, explicitly labeled campaign IDs, and explicitly labeled malware family, actor, and product names. It can also accept curated entity metadata on an article record. Exact shared CVEs, campaign IDs, and malware-family mentions are strong candidate signals. Product/actor overlaps are weaker. Same-language character-trigram and normalized token overlap, shared threat-category context, and publication-date proximity are weak supporting signals only. Dates missing on either side do not contribute. Source identity and original URLs are retained as provenance, not treated as proof of common origin. Actor-name overlap records a mention match only; it makes no attribution.
+
+The similarity score is a heuristic, not a probability. An exact identifier or explicit entity can produce a candidate, while direct lexical overlap alone does not create a cross-language candidate. Same-language text similarity can contribute to a candidate when it clears the documented threshold. The returned status is `Candidate` or `Insufficient evidence`; neither means confirmed same incident. Article publication time is used as a weak proxy because reported incident dates are not consistently extracted. No embedding model, GPU, paid API, external lookup, or newly added dependency is used.
+
+Use **Correlate collected reports** to compare up to the 300 most recent LIVE reports. DEMO DATA is excluded. The dashboard shows related report details, identifiers/entities, terms, methods, evidence, score, and language pair; it also displays a small relationship graph. A reviewer can mark a candidate `Human confirmed` or `Human rejected`, with an optional note. A human decision is appended to history and blocks later automated replacement. “Human confirmed” means a reviewer accepted a relationship; it does not independently verify all report claims or attribution.
+
+SQLite stores unique canonical article pairs in `correlation_pairs` and append-only candidate/review decisions in `correlation_assessments`. Re-running correlation avoids duplicate pair rows and does not append a repeated candidate assessment. A later human decision remains current; earlier automated and human decisions are preserved in history.
+
+### Stage 6 evaluation
+
+The separate [`evaluation/correlation_eval.jsonl`](evaluation/correlation_eval.jsonl) dataset is currently empty. Precision, recall, F1, false-positive rate, and results by English–Amharic, English–Afaan Oromo, and Amharic–Afaan Oromo are therefore **unavailable**. Add only permissioned, manually reviewed article pairs using the schema in [`evaluation/correlation_evaluation.md`](evaluation/correlation_evaluation.md). The evaluator measures candidate retrieval: same-incident and related-but-different pairs are relevant candidates, unrelated pairs are negatives, and insufficient-evidence pairs are reported separately and excluded from the binary metrics. It reports the four human-label supports and candidate rates but does not claim the baseline distinguishes the same event from a related event. Run:
+
+```bash
+python scripts/evaluate_correlation.py
+```
+
+Do not copy synthetic tests into the research evaluation dataset.
+
 ## Tests and compilation
 
 ```bash
@@ -152,8 +174,9 @@ Database initialization migrates the existing articles table transactionally, pr
 - Afaan Oromo cue coverage is small and may miss valid Oromo text or confuse overlapping vocabulary. Manually review uncertain labels and evaluate with diverse Oromo examples.
 - Stage 4 classification is a hand-built phrase baseline, not a learned classifier. Coverage is incomplete, scores are uncalibrated, and the current threat evaluation dataset is empty.
 - Stage 5 severity is a conservative report-evidence triage policy, not organizational risk scoring, incident validation, or calibrated prediction. Current dashboard assessments use article text only; no external source has been queried. Severity evaluation data is empty.
+- Stage 6 correlation is candidate retrieval, not incident adjudication. Cross-language detection depends mainly on shared explicit identifiers/entity names and misses reports that paraphrase without such anchors. Direct word/character overlap is not cross-language semantic understanding. There are no manually reviewed research pairs, so performance is unmeasured.
 - The current evaluation data is synthetic and too small to support research conclusions. Build a permissioned, manually reviewed corpus before reporting accuracy as a real-world result.
-- Cross-language incident correlation and multilingual summaries are not part of this stage.
+- Multilingual summaries are not part of this stage.
 
 ## Project layout
 
@@ -170,6 +193,7 @@ src/ethio_cyber_intel/
   language_detection.py                 CPU-only language detection heuristics
   threat_classification.py              Evidence-producing multilingual rules baseline
   severity_assessment.py               Evidence-led severity triage rules
+  correlation.py                        Explainable cross-language candidate matching
   rss_collector.py                      RSS fetching and normalization
   rss_sources.py                        RSS configuration validation
 tests/                                  Offline tests and separate synthetic fixtures
@@ -177,4 +201,6 @@ evaluation/threat_eval.jsonl            Empty, manually reviewed research evalua
 scripts/evaluate_threat_classifier.py   Multilabel evaluation metrics
 evaluation/severity_eval.jsonl         Empty, manually reviewed severity evaluation set
 scripts/evaluate_severity.py             Severity agreement and classification metrics
+evaluation/correlation_eval.jsonl       Empty, manually reviewed article-pair evaluation set
+scripts/evaluate_correlation.py          Candidate retrieval evaluation metrics
 ```

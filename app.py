@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import logging
+import math
 import sys
 from pathlib import Path
 
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -16,10 +18,12 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 from ethio_cyber_intel.article_extractor import ArticleExtractor  # noqa: E402
 from ethio_cyber_intel.config import seed_demo_enabled  # noqa: E402
 from ethio_cyber_intel.dashboard_data import (  # noqa: E402
-    load_articles, load_current_classifications, load_current_severity_assessments,
+    load_articles, load_current_classifications, load_current_correlations,
+    load_current_severity_assessments,
 )
 from ethio_cyber_intel.database import (  # noqa: E402
-    assess_pending_articles, classify_pending_articles, initialize_database, insert_live_articles,
+    assess_pending_articles, classify_pending_articles, correlate_pending_articles,
+    initialize_database, insert_live_articles, save_manual_correlation,
 )
 from ethio_cyber_intel.language_detection import MIN_CONFIDENCE  # noqa: E402
 from ethio_cyber_intel.rss_collector import collect_all  # noqa: E402
@@ -121,6 +125,98 @@ def _attach_severities(articles: pd.DataFrame, assessments: pd.DataFrame) -> pd.
     return result
 
 
+def _relationship_graph(correlations: pd.DataFrame) -> None:
+    """Draw a small deterministic article-pair graph for visual inspection."""
+    if correlations.empty:
+        return
+    pairs = correlations.head(25)
+    article_meta = {}
+    edges = []
+    for _, row in pairs.iterrows():
+        left, right = int(row["article_id_a"]), int(row["article_id_b"])
+        article_meta[left] = (row["title_a"], row["article_language_a"])
+        article_meta[right] = (row["title_b"], row["article_language_b"])
+        edges.append((left, right))
+    nodes = list(article_meta)
+    points = {
+        node: (math.cos(2 * math.pi * index / max(1, len(nodes))),
+               math.sin(2 * math.pi * index / max(1, len(nodes))))
+        for index, node in enumerate(nodes)
+    }
+    edge_x, edge_y = [], []
+    for left, right in edges:
+        edge_x.extend([points[left][0], points[right][0], None])
+        edge_y.extend([points[left][1], points[right][1], None])
+    figure = go.Figure()
+    figure.add_trace(go.Scatter(x=edge_x, y=edge_y, mode="lines", line={"width": 1, "color": "#8b98a5"}, hoverinfo="skip"))
+    figure.add_trace(go.Scatter(
+        x=[points[node][0] for node in nodes], y=[points[node][1] for node in nodes],
+        mode="markers+text", text=[str(node) for node in nodes], textposition="top center",
+        marker={"size": 18, "color": [{"en": 0, "am": 1, "om": 2}.get(article_meta[node][1], 3) for node in nodes],
+                "colorscale": "Viridis", "showscale": False},
+        customdata=[[article_meta[node][0], article_meta[node][1]] for node in nodes],
+        hovertemplate="Article ID %{text}<br>%{customdata[0]}<br>Language: %{customdata[1]}<extra></extra>",
+    ))
+    figure.update_layout(showlegend=False, height=360, margin={"l": 10, "r": 10, "t": 10, "b": 10},
+                         xaxis={"visible": False}, yaxis={"visible": False})
+    st.plotly_chart(figure, use_container_width=True)
+
+
+def _render_correlations(correlations: pd.DataFrame, db_path: Path) -> None:
+    st.subheader("Related reports: cross-language correlation")
+    if correlations.empty:
+        st.info("No candidate or reviewed relationships are stored. Run correlation to compare collected reports.")
+        return
+    metric_cols = st.columns(3)
+    metric_cols[0].metric("Candidate relationships", int((correlations["status"] == "Candidate").sum()))
+    metric_cols[1].metric("Human confirmed", int((correlations["status"] == "Human confirmed").sum()))
+    metric_cols[2].metric("Human rejected", int((correlations["status"] == "Human rejected").sum()))
+
+    pairs = ["All language pairs"] + sorted(correlations["language_pair"].dropna().unique().tolist())
+    selected_pair = st.selectbox("Correlation language pair", pairs)
+    visible = correlations if selected_pair == "All language pairs" else correlations[correlations["language_pair"] == selected_pair]
+    active_relationships = visible[visible["status"] != "Human rejected"]
+    graph_col, chart_col = st.columns(2)
+    with graph_col:
+        st.caption("Relationship graph (node labels are article IDs; edges indicate saved relationships, not confirmed incidents).")
+        _relationship_graph(active_relationships)
+    with chart_col:
+        st.caption("Language distribution among reports in these relationships")
+        language_counts = pd.concat([
+            active_relationships[["article_id_a", "article_language_a"]].rename(columns={"article_id_a": "article_id", "article_language_a": "language"}),
+            active_relationships[["article_id_b", "article_language_b"]].rename(columns={"article_id_b": "article_id", "article_language_b": "language"}),
+        ]).drop_duplicates("article_id")["language"].value_counts().rename_axis("Language").reset_index(name="Reports")
+        st.plotly_chart(px.bar(language_counts, x="Language", y="Reports", color="Language"), use_container_width=True)
+
+    st.markdown("**Relationship details and human review**")
+    import json
+    for _, row in visible.iterrows():
+        label = f"{row['status']} · {row['language_pair']} · score {row['score']:.2f} · reports {row['article_id_a']} / {row['article_id_b']}"
+        with st.expander(label):
+            st.write(f"**{row['title_a']}** — {row['source_a']} · {row['published_a'] or 'Date unknown'} · [{row['url_a']}]({row['url_a']})")
+            st.write(f"**{row['title_b']}** — {row['source_b']} · {row['published_b'] or 'Date unknown'} · [{row['url_b']}]({row['url_b']})")
+            st.write(row["explanation"])
+            st.write(f"Similarity methods: {', '.join(json.loads(row['similarity_methods_json'])) or 'none'}")
+            st.write(f"Shared identifiers: {json.loads(row['matching_identifiers_json']) or 'None'}")
+            st.write(f"Shared entities: {json.loads(row['shared_entities_json']) or 'None'}")
+            st.write(f"Shared terms: {', '.join(json.loads(row['shared_terms_json'])) or 'None'}")
+            with st.expander("Supporting evidence"):
+                st.json(json.loads(row["supporting_evidence_json"]))
+            if row["reviewer_note"]:
+                st.write(f"Reviewer note: {row['reviewer_note']}")
+            if row["status"] == "Candidate":
+                note = st.text_input("Review note", key=f"correlation_note_{row['pair_id']}")
+                confirm_col, reject_col = st.columns(2)
+                if confirm_col.button("Confirm related reports", key=f"correlation_confirm_{row['pair_id']}"):
+                    save_manual_correlation(int(row["article_id_a"]), int(row["article_id_b"]),
+                                            decision="Human confirmed", reviewer_note=note, db_path=db_path)
+                    st.rerun()
+                if reject_col.button("Reject relationship", key=f"correlation_reject_{row['pair_id']}"):
+                    save_manual_correlation(int(row["article_id_a"]), int(row["article_id_b"]),
+                                            decision="Human rejected", reviewer_note=note, db_path=db_path)
+                    st.rerun()
+
+
 def _refresh(db_path: Path) -> None:
     sources = load_sources(enabled_only=True)
     if not sources:
@@ -164,6 +260,7 @@ def main() -> None:
         articles = load_articles(db_path)
         labels = load_current_classifications(db_path)
         severity_rows = load_current_severity_assessments(db_path)
+        correlation_rows = load_current_correlations(db_path)
     except Exception as exc:
         logger.exception("Dashboard could not load the local database")
         st.error(f"The local database could not be loaded: {exc}")
@@ -204,6 +301,19 @@ def main() -> None:
             logger.exception("Severity assessment failed")
             st.error(f"Could not assess report severity: {exc}")
 
+    if st.button("🔗 Correlate collected reports"):
+        try:
+            with st.spinner("Comparing recent LIVE reports using lightweight signals…"):
+                counts = correlate_pending_articles(db_path)
+            st.success(
+                f"Compared {counts['compared']} report pairs; found {counts['candidates']} candidates, "
+                f"saved {counts['saved']} new relationships."
+            )
+            correlation_rows = load_current_correlations(db_path)
+        except Exception as exc:
+            logger.exception("Cross-language correlation failed")
+            st.error(f"Could not correlate reports: {exc}")
+
     articles = _attach_classifications(articles, labels)
     articles = _attach_severities(articles, severity_rows)
 
@@ -239,6 +349,8 @@ def main() -> None:
     st.metric("Unknown or unclassified reports", unknown_classifications)
     unknown_severity = int((articles["severity"] == "Unknown").sum()) if not articles.empty else 0
     st.metric("Unknown severity", unknown_severity)
+
+    _render_correlations(correlation_rows, db_path)
 
     language_metrics = st.columns(5)
     for column, code in zip(language_metrics, ("en", "am", "om", "und", "mul")):

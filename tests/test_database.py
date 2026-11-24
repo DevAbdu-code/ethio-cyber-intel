@@ -230,6 +230,66 @@ class DatabaseInitializationTests(unittest.TestCase):
         self.assertEqual((after["title"], after["url"], after["summary"], after["content"]),
                          (article["title"], article["url"], article["summary"], article["content"]))
 
+    def test_stage_six_migration_history_deduplication_and_human_decisions(self):
+        from src.ethio_cyber_intel.correlation import correlate_pair
+        from src.ethio_cyber_intel.database import (
+            assess_pending_articles, classify_pending_articles, connect,
+            correlate_pending_articles, insert_live_articles, save_correlation,
+            save_manual_correlation,
+        )
+        from src.ethio_cyber_intel.dashboard_data import load_current_correlations
+
+        initialize_database(self.db_path, seed_demo=False)
+        insert_live_articles([
+            {"title": "CVE-2026-55667 report details", "url": "https://news.test/a",
+             "source": "Source A", "language": "en", "content": "CVE-2026-55667 report text."},
+            {"title": "CVE-2026-55667 መረጃ", "url": "https://news.test/b",
+             "source": "Source B", "language": "am", "content": "CVE-2026-55667 መረጃ።"},
+            {"title": "CVE-2026-55667 odeeffannoo", "url": "https://news.test/c",
+             "source": "Source C", "language": "om", "content": "CVE-2026-55667 odeeffannoo."},
+        ], self.db_path)
+        self.assertEqual(classify_pending_articles(self.db_path)["classified"], 3)
+        self.assertEqual(assess_pending_articles(self.db_path)["unknown"], 3)
+        with connect(self.db_path) as connection:
+            before_articles = connection.execute("SELECT COUNT(*) FROM articles").fetchone()[0]
+            before_labels = connection.execute("SELECT COUNT(*) FROM threat_classification_labels").fetchone()[0]
+            before_severity = connection.execute("SELECT COUNT(*) FROM severity_assessments").fetchone()[0]
+            article_rows = [dict(row) for row in connection.execute("SELECT * FROM articles ORDER BY id")]
+            tables = {row[0] for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )}
+        self.assertIn("correlation_pairs", tables)
+        self.assertIn("correlation_assessments", tables)
+        candidate_ab = correlate_pair(article_rows[0], article_rows[1])
+        candidate_ac = correlate_pair(article_rows[0], article_rows[2])
+        self.assertTrue(save_correlation(candidate_ab, self.db_path)["saved"])
+        repeated = save_correlation(candidate_ab, self.db_path)
+        self.assertEqual(repeated["reason"], "candidate_already_recorded")
+        save_manual_correlation(1, 2, decision="Human confirmed", reviewer_note="Reviewed pair", db_path=self.db_path)
+        self.assertFalse(save_correlation(candidate_ab, self.db_path)["saved"])
+        self.assertTrue(save_correlation(candidate_ac, self.db_path)["saved"])
+        save_manual_correlation(1, 3, decision="Human rejected", reviewer_note="Different events", db_path=self.db_path)
+        self.assertFalse(save_correlation(candidate_ac, self.db_path)["saved"])
+        initialize_database(self.db_path, seed_demo=False)
+        current = load_current_correlations(self.db_path)
+        status_by_pair = {(row.article_id_a, row.article_id_b): row.status for row in current.itertuples()}
+        self.assertEqual(status_by_pair, {(1, 2): "Human confirmed", (1, 3): "Human rejected"})
+        confirmed_row = current[current["status"] == "Human confirmed"].iloc[0]
+        self.assertIn("CVE-2026-55667", confirmed_row["matching_identifiers_json"])
+        self.assertGreater(confirmed_row["score"], 0)
+        with connect(self.db_path) as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM articles").fetchone()[0], before_articles)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM threat_classification_labels").fetchone()[0], before_labels)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM severity_assessments").fetchone()[0], before_severity)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM correlation_pairs").fetchone()[0], 2)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM correlation_assessments").fetchone()[0], 4)
+
+    def test_correlation_batch_excludes_demo_articles(self):
+        from src.ethio_cyber_intel.database import correlate_pending_articles
+        initialize_database(self.db_path, seed_demo=True)
+        result = correlate_pending_articles(self.db_path)
+        self.assertEqual(result["compared"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()
