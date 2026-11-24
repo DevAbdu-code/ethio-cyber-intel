@@ -29,6 +29,7 @@ def test_evaluator_requires_human_review_and_exact_method_output(tmp_path: Path)
     summary = summarize_article(article)
     row = {
         "article": article, "manually_reviewed": True,
+        "synthetic": True,
         "source_note": "Synthetic unit-test example, not research data",
         "review": {"method_version": "1.0", "summary_text": summary.summary_text,
                    "ratings": {field: 4 for field in RATING_FIELDS},
@@ -37,8 +38,9 @@ def test_evaluator_requires_human_review_and_exact_method_output(tmp_path: Path)
     path = tmp_path / "reviewed-temp.jsonl"
     path.write_text(json.dumps(row) + "\n", encoding="utf-8")
     result = evaluate(path)
-    assert result["overall"]["factual_consistency"] == 4.0
-    assert result["by_language"]["en"]["examples"] == 1
+    assert result["overall"]["factual_consistency"] is None
+    assert result["synthetic_sanity_check"]["human_ratings"]["factual_consistency"] == 4.0
+    assert result["by_language"]["en"]["examples"] == 0
     row["manually_reviewed"] = False
     path.write_text(json.dumps(row) + "\n", encoding="utf-8")
     with pytest.raises(ValueError, match="manually_reviewed"):

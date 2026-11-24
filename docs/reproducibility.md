@@ -1,6 +1,6 @@
 # Reproducibility Guide
 
-This guide reproduces the Stage 8 checks without writing to the user's research database or converting test fixtures into research data.
+This guide reproduces Stage 8 validation and Stage 9 research evaluation without writing to the user's research database or converting test fixtures into research data.
 
 ## Environment
 
@@ -27,15 +27,17 @@ python scripts/evaluate_threat_classifier.py
 python scripts/evaluate_severity.py
 python scripts/evaluate_correlation.py
 python scripts/evaluate_summaries.py
+python scripts/evaluate_extraction.py
+python scripts/run_research_evaluation.py
 ```
 
-The language output is a **synthetic sanity check** from 15 researcher-authored rows. The other four research datasets are empty, so their metrics should remain `null`/unavailable. Do not copy `tests/fixtures/` or unit-test cases into the research evaluation datasets.
+The language output is a **synthetic sanity check** from 15 researcher-authored rows. Threat, severity, correlation, summary, and extraction research datasets are currently empty, so their metrics should remain `null`/unavailable. Do not copy `tests/fixtures/` or unit-test cases into the research evaluation datasets. The unified runner is deterministic for the same source revision and dataset content, has no network or SQLite dependency, and only writes a file if `--output` is explicitly supplied.
 
 ### Add reviewed research examples
 
-Use the schema instructions in `evaluation/README.md` and the stage-specific files under `evaluation/`. Add one JSON object per line, retain only text permitted by its publisher/source, record provenance and permission, and set the required manual-review fields. For correlation, both articles in a pair must be manually adjudicated. For summaries, reviewers must assess the exact saved output and method version; Amharic/Afaan Oromo ratings should be completed by fluent reviewers. Do not treat researcher-authored synthetic text as a real report. Keep test fixtures separate.
+Use the JSON schemas in `evaluation/templates/`, the protocol in `docs/stage9_annotation_guidelines.md`, and the dataset instructions under `evaluation/`. Add one JSON object per line, retain only text permitted by its publisher/source, record provenance and permission, and set reviewer decision, review date, dataset version, and synthetic flag. For correlation, both articles in a pair must be manually adjudicated. For summaries, reviewers must assess the exact output and method version; Amharic/Afaan Oromo ratings should be completed by fluent reviewers. For extraction, compare output with the feed entry and canonical publisher page. Do not treat researcher-authored synthetic text as a real report. Keep test fixtures separate.
 
-After adding data, rerun only the appropriate script first, inspect its `evaluated_examples`/support counts and output, and report the sample size alongside every metric. The evaluators do not create labels or ground truth.
+After adding data, rerun only the appropriate script first, inspect eligible research/synthetic counts and output, and report the sample size alongside every metric. The evaluators do not create labels or ground truth. Severity nominal scores include Unknown; ordinal weighted agreement excludes Unknown and reports its denominator. Threat `unknown` is treated separately as abstention. Correlation measures candidate retrieval, not same-incident proof.
 
 ## Automated checks
 

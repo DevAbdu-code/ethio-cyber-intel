@@ -1,0 +1,9 @@
+{
+  "record_id": "EXTRACTION_REVIEW_ID", "article_id": "SOURCE_ARTICLE_ID",
+  "source": "Publisher", "source_url": "https://publisher.example/article",
+  "language": "en", "reviewer_decision": "Human comparison against original publisher page and RSS entry",
+  "review_date": "YYYY-MM-DD", "dataset_version": "1.0.0", "manually_reviewed": true,
+  "synthetic": false, "source_note": "Access date, RSS feed URL, page URL, and retention permission",
+  "observation": {"identity_verified": true, "title": "", "canonical_url": "", "body": "", "rss_fallback_used": false, "ambiguous_rejected": false},
+  "review": {"identity_correct": true, "title_correct": true, "canonical_url_correct": true, "body_relevant": true, "rss_fallback_appropriate": null, "ambiguous_page_rejected": null, "source_attribution_correct": true}
+}

@@ -21,6 +21,14 @@ python -m compileall -q app.py src tests scripts
 git diff --check
 ```
 
+## Stage 9: research evaluation and intelligence quality assurance
+
+Stage 9 adds deterministic, dependency-free evaluators for language detection, multi-label threat classification, evidence-based severity, candidate correlation, article extraction, and extractive summaries. Run all reports with `python scripts/run_research_evaluation.py`; use `--output /tmp/report.json` to save the unified JSON report. The scripts do not access or modify SQLite and do not make network requests.
+
+Synthetic records are reported separately and never contribute to research metrics. Every real research row must include stable identity, source URL/provenance, reviewer decision, review date, dataset version, and `synthetic: false`. Empty or missing reviewed datasets produce unavailable (`null`) metrics, not fabricated zeros. The existing language file has 15 synthetic sanity-check examples; the other research datasets remain empty, and extraction review data is also empty. Thus real-world performance metrics are currently unavailable. Templates and guidance are in [`evaluation/templates`](evaluation/templates) and [Stage 9 methodology](docs/stage9_evaluation_methodology.md), [annotation guidelines](docs/stage9_annotation_guidelines.md), [results template](docs/stage9_results_template.md), and [limitations](docs/stage9_limitations_and_validity.md).
+
+Threat `unknown` is handled as a separate abstention outcome, not a threat category. Severity `Unknown` remains a valid nominal outcome; ordinal agreement excludes Unknown and reports its own denominator. Correlation metrics evaluate candidate retrieval and do not establish same-incident identity. Extraction success requires human confirmation of article identity, title, canonical URL, relevant body content, and attribution. Summaries remain extractive and are not translations.
+
 For the follow-up pipeline investigation, see the [RSS, extraction, language, and processing validation report](docs/pipeline_validation_report.md). It documents the THN article-body mismatch, the verified legacy-language backfill, the backed-up additive SQLite migration, and current processing counts.
 
 ## Requirements and installation

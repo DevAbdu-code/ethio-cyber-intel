@@ -11,6 +11,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from src.ethio_cyber_intel.correlation import correlate_pair  # noqa: E402
+from src.ethio_cyber_intel.evaluation_metrics import (  # noqa: E402
+    read_jsonl, split_dataset, validate_research_provenance, validate_unique,
+)
 
 LABELS = ("same_incident", "related_different_events", "unrelated_events", "insufficient_evidence")
 LANGUAGE_PAIRS = ("en-am", "en-om", "am-om")
@@ -35,15 +38,18 @@ def _pair_key(language_a: str, language_b: str) -> str:
 
 
 def evaluate(path: Path) -> dict:
-    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
-            if line.strip() and not line.lstrip().startswith("#")]
+    rows = read_jsonl(path)
+    for index, row in enumerate(rows, 1):
+        if row.get("manually_reviewed") is not True:
+            raise ValueError(f"Pair {index} must set manually_reviewed to true")
+    groups = split_dataset(rows)
     for index, row in enumerate(rows, 1):
         if row.get("manually_reviewed") is not True:
             raise ValueError(f"Pair {index} must set manually_reviewed to true")
         if row.get("human_label") not in LABELS:
             raise ValueError(f"Pair {index} has unsupported human_label")
-        if not row.get("source_note"):
-            raise ValueError(f"Pair {index} requires provenance in source_note")
+        if not row["synthetic"]:
+            validate_research_provenance(row, index, article_keys=("record_id",))
         for side in ("article_a", "article_b"):
             article = row.get(side)
             if not isinstance(article, dict) or article.get("language") not in {"en", "am", "om"}:
@@ -51,6 +57,8 @@ def evaluate(path: Path) -> dict:
         pair_key = _pair_key(row["article_a"]["language"], row["article_b"]["language"])
         if pair_key not in LANGUAGE_PAIRS:
             raise ValueError(f"Pair {index} must use one of the cross-language pairs {LANGUAGE_PAIRS}")
+    validate_unique(groups["research"], lambda row: tuple(sorted((str(row["article_a"].get("id") or row["article_a"].get("url")), str(row["article_b"].get("id") or row["article_b"].get("url"))))), label="article pair")
+    rows = groups["research"]
     counts = {key: [0, 0, 0, 0] for key in LANGUAGE_PAIRS}  # TP, FP, FN, TN
     labels_by_truth = {label: {"examples": 0, "candidate_rate": 0} for label in LABELS}
     excluded_insufficient = 0
@@ -81,6 +89,7 @@ def evaluate(path: Path) -> dict:
         value["candidate_rate"] = round(value["candidate_rate"] / value["examples"], 4) if value["examples"] else None
     return {
         "dataset": str(path), "manually_reviewed_pairs": len(rows),
+        "synthetic_pairs_excluded": len(groups["synthetic"]),
         "binary_target": "same_incident or related_different_events versus unrelated_events; insufficient_evidence excluded",
         "excluded_insufficient_evidence": excluded_insufficient,
         "overall": _binary_metrics(tp, fp, fn, tn, evaluated),

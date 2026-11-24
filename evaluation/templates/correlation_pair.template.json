@@ -1,0 +1,8 @@
+{
+  "record_id": "PAIR_STABLE_ID", "article_a": {"id": "ARTICLE_A", "title": "", "source": "", "url": "", "language": "en", "content": ""},
+  "article_b": {"id": "ARTICLE_B", "title": "", "source": "", "url": "", "language": "am", "content": ""},
+  "human_label": "insufficient_evidence", "reviewer_decision": "Adjudication rationale; relationship does not assert attribution",
+  "review_date": "YYYY-MM-DD", "dataset_version": "1.0.0", "manually_reviewed": true,
+  "synthetic": false, "source": "Pair provenance", "source_url": "https://publisher.example/article",
+  "source_note": "Both source URLs, access dates, retention permission, and review provenance"
+}

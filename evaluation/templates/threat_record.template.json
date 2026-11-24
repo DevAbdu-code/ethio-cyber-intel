@@ -1,0 +1,8 @@
+{
+  "record_id": "REPLACE_WITH_STABLE_ID", "article_id": "SOURCE_ARTICLE_ID",
+  "source": "Publisher", "source_url": "https://publisher.example/article",
+  "language": "om", "text": "Permissioned excerpt", "labels": ["unknown"],
+  "reviewer_decision": "Adjudicated label rationale", "review_date": "YYYY-MM-DD",
+  "dataset_version": "1.0.0", "manually_reviewed": true, "synthetic": false,
+  "source_note": "Access date and retention permission"
+}

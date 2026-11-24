@@ -1,0 +1,9 @@
+{
+  "record_id": "SUMMARY_REVIEW_ID", "article_id": "SOURCE_ARTICLE_ID",
+  "source": "Publisher", "source_url": "https://publisher.example/article",
+  "article": {"title": "", "source": "Publisher", "url": "https://publisher.example/article", "published_at": null, "language": "en", "content": "Permissioned full source text"},
+  "reviewer_decision": "Reviewer notes; use fluent reviewer for am/om",
+  "review_date": "YYYY-MM-DD", "dataset_version": "1.0.0", "manually_reviewed": true,
+  "synthetic": false, "source_note": "Access date and retention permission",
+  "review": {"method_version": "1.0", "summary_text": "Exact output from the method/version", "ratings": {"factual_consistency": 1, "important_information_coverage": 1, "language_correctness": 1, "readability": 1, "usefulness": 1}, "claim_count": 0, "unsupported_claim_count": 0}
+}

@@ -20,7 +20,7 @@ def test_empty_research_dataset_reports_no_metrics(tmp_path: Path):
 def test_evaluation_rejects_unreviewed_rows(tmp_path: Path):
     dataset = tmp_path / "not-reviewed.jsonl"
     dataset.write_text(
-        '{"text":"synthetic test phrase", "language":"en", "labels":["phishing"], '
+        '{"text":"synthetic test phrase", "language":"en", "labels":["phishing"], "synthetic":true, '
         '"manually_reviewed":false, "source_note":"unit test"}\n', encoding="utf-8"
     )
     with pytest.raises(ValueError, match="manually_reviewed"):

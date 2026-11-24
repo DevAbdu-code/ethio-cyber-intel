@@ -1,8 +1,9 @@
-"""Report transparent classification metrics for a manually labeled JSONL file."""
+"""Evaluate language detection with synthetic and reviewed examples separated."""
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -10,50 +11,55 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from src.ethio_cyber_intel.language_detection import detect_language  # noqa: E402
+from src.ethio_cyber_intel.evaluation_metrics import (  # noqa: E402
+    classification_metrics, read_jsonl, split_dataset, validate_research_provenance, validate_unique,
+)
+from src.ethio_cyber_intel.language_detection import LANGUAGE_CODES, detect_language  # noqa: E402
 
-LABELS = ("en", "am", "om", "und", "mul")
+
+def _evaluate_rows(rows: list[dict]) -> dict | None:
+    if not rows:
+        return None
+    actual, predicted = [], []
+    for row in rows:
+        label = row.get("label")
+        if label not in LANGUAGE_CODES:
+            raise ValueError(f"Unsupported language label: {label!r}")
+        text = row.get("text")
+        if not isinstance(text, str):
+            raise ValueError("Each language record requires text as a string")
+        actual.append(label)
+        predicted.append(detect_language(text).language)
+    return classification_metrics(actual, predicted, LANGUAGE_CODES)
 
 
 def evaluate(path: Path) -> dict:
-    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
-    confusion = {truth: {prediction: 0 for prediction in LABELS} for truth in LABELS}
-    counts = {label: 0 for label in LABELS}
-    correct = 0
-    for row in rows:
-        truth = row["label"]
-        if truth not in LABELS:
-            raise ValueError(f"Unsupported ground-truth label: {truth}")
-        if row.get("labeling") != "manually_labeled":
-            raise ValueError("Each evaluation record must be marked manually_labeled")
-        prediction = detect_language(row.get("text", "")).language
-        counts[truth] += 1
-        confusion[truth][prediction] += 1
-        correct += prediction == truth
+    rows = read_jsonl(path)
+    groups = split_dataset(rows)
+    for index, row in enumerate(rows, 1):
+        if row.get("labeling") not in {"manually_labeled", "adjudicated"}:
+            raise ValueError(f"Record {index} requires a human label")
+        if not row.get("source_note"):
+            raise ValueError(f"Record {index} requires source_note provenance")
+    research_rows = groups["research"]
+    for index, row in enumerate(research_rows, 1):
+        validate_research_provenance(row, index, article_keys=("article_id", "record_id"))
 
-    per_language = {}
-    for label in LABELS:
-        tp = confusion[label][label]
-        predicted = sum(confusion[truth][label] for truth in LABELS)
-        support = counts[label]
-        precision = tp / predicted if predicted else 0.0
-        recall = tp / support if support else 0.0
-        f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
-        per_language[label] = {
-            "precision": round(precision, 4), "recall": round(recall, 4),
-            "f1": round(f1, 4), "support": support,
-        }
-    total = len(rows)
+    # Synthetic rows do not receive a fabricated article identity. Use the
+    # normalized text digest only to prevent repeated fixture rows.
+    validate_unique(groups["synthetic"], lambda row: hashlib.sha256(
+        " ".join(str(row.get("text", "")).split()).encode("utf-8")
+    ).hexdigest(), label="synthetic text fingerprint")
+    validate_unique(research_rows, lambda row: row.get("article_id") or row.get("record_id"), label="article")
+
     return {
-        "dataset": str(path),
-        "records": total,
-        "synthetic_records": sum(bool(row.get("synthetic")) for row in rows),
-        "accuracy": round(correct / total, 4) if total else 0.0,
-        "macro_precision": round(sum(item["precision"] for item in per_language.values()) / len(LABELS), 4),
-        "macro_recall": round(sum(item["recall"] for item in per_language.values()) / len(LABELS), 4),
-        "macro_f1": round(sum(item["f1"] for item in per_language.values()) / len(LABELS), 4),
-        "per_language": per_language,
-        "confusion_matrix_rows_true_columns_predicted": confusion,
+        "dataset": str(path), "records": len(rows),
+        "synthetic_records": len(groups["synthetic"]),
+        "independently_reviewed_real_records": len(research_rows),
+        "research_metrics": _evaluate_rows(research_rows),
+        "synthetic_sanity_check": _evaluate_rows(groups["synthetic"]),
+        "supported_labels": list(LANGUAGE_CODES),
+        "interpretation": "Synthetic sanity-check metrics are not field-performance estimates. Research metrics are None when no independently reviewed real examples exist.",
     }
 
 

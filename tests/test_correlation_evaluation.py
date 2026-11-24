@@ -29,16 +29,17 @@ def test_evaluation_requires_manual_review(tmp_path: Path):
         evaluate(path)
 
 
-def test_reviewed_synthetic_pair_metrics_use_requested_language_key(tmp_path: Path):
+def test_synthetic_pairs_are_excluded_from_research_metrics(tmp_path: Path):
     import json
     path = tmp_path / "temporary-test-pair.jsonl"
     row = {
         "article_a": {"id": 1, "title": "CVE-2026-12345 report", "language": "en"},
         "article_b": {"id": 2, "title": "CVE-2026-12345 ሪፖርት", "language": "am"},
         "human_label": "same_incident", "manually_reviewed": True,
+        "synthetic": True,
         "source_note": "Synthetic temporary test record; not research data",
     }
     path.write_text(json.dumps(row, ensure_ascii=False) + "\n", encoding="utf-8")
     result = evaluate(path)
-    assert result["overall"]["recall"] == 1.0
-    assert result["by_language_pair"]["en-am"]["tp"] == 1
+    assert result["overall"]["recall"] is None
+    assert result["synthetic_pairs_excluded"] == 1

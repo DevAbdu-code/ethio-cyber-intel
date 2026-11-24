@@ -1,0 +1,16 @@
+{
+  "record_id": "REPLACE_WITH_STABLE_ID",
+  "article_id": "REPLACE_WITH_SOURCE_ARTICLE_ID",
+  "source": "Publisher name",
+  "source_url": "https://publisher.example/article",
+  "language": "en",
+  "text": "Permissioned excerpt or documented retained text",
+  "label": "en",
+  "labeling": "adjudicated",
+  "reviewer_decision": "Two reviewers agreed; adjudication recorded if needed",
+  "review_date": "YYYY-MM-DD",
+  "dataset_version": "1.0.0",
+  "manually_reviewed": true,
+  "synthetic": false,
+  "source_note": "Access date, retention permission/legal basis, and provenance"
+}
