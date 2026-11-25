@@ -897,6 +897,16 @@ def correlate_pending_articles(
 def save_summary_result(article_id: int, summary, db_path: str | Path | None = None) -> dict[str, int | bool | str]:
     """Append an automated summary result, skipping duplicates and human reviews."""
     value = summary.as_dict() if hasattr(summary, "as_dict") else dict(summary)
+    from .summarization import is_missing_summary_text
+
+    status = value.get("status")
+    if status not in {"original_extractive", "insufficient_content", "unsupported_language", "unsupported_translation"}:
+        raise ValueError(f"Unsupported automated summary status: {status!r}")
+    summary_text = value.get("summary_text")
+    if status == "original_extractive" and is_missing_summary_text(summary_text):
+        return {"saved": False, "reason": "empty_summary"}
+    if is_missing_summary_text(summary_text):
+        value["summary_text"] = None
     try:
         with connect(db_path) as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -908,9 +918,26 @@ def save_summary_result(article_id: int, summary, db_path: str | Path | None = N
                 (article_id, value["summary_language"]),
             ).fetchone():
                 return {"saved": False, "reason": "human_review_preserved"}
+            if status == "insufficient_content":
+                failed_duplicate = connection.execute(
+                    """SELECT id FROM article_summaries WHERE article_id=? AND summary_language=?
+                       AND source_text_fingerprint=? AND summary_method=? AND method_version=?
+                       AND summary_status='insufficient_content' LIMIT 1""",
+                    (article_id, value["summary_language"], value["source_text_fingerprint"],
+                     value["method"], value["method_version"]),
+                ).fetchone()
+                if failed_duplicate:
+                    return {
+                        "saved": False,
+                        "reason": "duplicate_insufficient_content",
+                        "summary_id": int(failed_duplicate["id"]),
+                    }
             duplicate = connection.execute(
                 """SELECT id FROM article_summaries WHERE article_id=? AND summary_language=?
-                   AND source_text_fingerprint=? AND summary_method=? AND method_version=? LIMIT 1""",
+                   AND source_text_fingerprint=? AND summary_method=? AND method_version=?
+                   AND summary_status='original_extractive'
+                   AND summary_text IS NOT NULL AND LENGTH(TRIM(summary_text)) > 0
+                   AND LOWER(TRIM(summary_text)) NOT IN ('nan','none','<na>','nat') LIMIT 1""",
                 (article_id, value["summary_language"], value["source_text_fingerprint"],
                  value["method"], value["method_version"]),
             ).fetchone()

@@ -469,6 +469,80 @@ class DatabaseInitializationTests(unittest.TestCase):
         self.assertEqual(after["content"], before["content"])
         self.assertEqual(counts_after, counts_before)
 
+    def test_summary_store_rejects_empty_success_and_keeps_latest_available_state(self):
+        from src.ethio_cyber_intel.database import (
+            connect, insert_live_articles, save_summary_result,
+        )
+        from src.ethio_cyber_intel.dashboard_data import load_current_summaries
+        from src.ethio_cyber_intel.summarization import summarize_article
+
+        initialize_database(self.db_path, seed_demo=False)
+        content = (
+            "Researchers reviewed a security issue affecting network software. "
+            "The report identifies CVE-2026-77881 in its published details. "
+            "The source recommends that administrators review vendor guidance. "
+            "No independent exploitation confirmation is included in this test text."
+        )
+        insert_live_articles([{
+            "title": "Synthetic summary database test article",
+            "url": "https://example.test/summary-db", "source": "Synthetic source",
+            "language": "en", "content": content,
+            "content_validation_status": "rss_feed_entry",
+        }], self.db_path)
+        article = {"id": 1, "title": "Synthetic summary database test article",
+                   "url": "https://example.test/summary-db", "source": "Synthetic source",
+                   "language": "en", "content": content}
+        unclassified = summarize_article(dict(article, language="und"), requested_language="en")
+        self.assertEqual(unclassified.status, "unsupported_language")
+        self.assertTrue(save_summary_result(1, unclassified, self.db_path)["saved"])
+        available = summarize_article(article)
+        # Earlier null-output history for this language must not suppress a
+        # later successful result after the source language is known.
+        self.assertTrue(save_summary_result(1, available, self.db_path)["saved"])
+        unavailable = summarize_article(article, requested_language="am")
+        self.assertTrue(save_summary_result(1, unavailable, self.db_path)["saved"])
+
+        empty_success = available.as_dict()
+        empty_success["summary_text"] = float("nan")
+        rejected = save_summary_result(1, empty_success, self.db_path)
+        self.assertEqual(rejected["reason"], "empty_summary")
+        current = load_current_summaries(self.db_path)
+        self.assertEqual(current.iloc[0]["summary_status"], "original_extractive")
+        self.assertEqual(current.iloc[0]["summary_language"], "en")
+        with connect(self.db_path) as connection:
+            history = connection.execute(
+                "SELECT summary_status,summary_text FROM article_summaries ORDER BY id"
+            ).fetchall()
+            self.assertEqual(len(history), 3)
+            self.assertIsNone(history[0][1])
+            self.assertIsNotNone(history[1][1])
+            self.assertIsNone(history[2][1])
+
+    def test_identical_insufficient_summary_attempt_is_not_appended_repeatedly(self):
+        from src.ethio_cyber_intel.database import connect, insert_live_articles, save_summary_result
+        from src.ethio_cyber_intel.summarization import summarize_article
+
+        initialize_database(self.db_path, seed_demo=False)
+        article = {
+            "id": 1, "title": "Synthetic short report", "url": "https://example.test/short",
+            "source": "Synthetic source", "language": "en",
+            "summary": "A brief source statement without enough distinct evidence.",
+        }
+        insert_live_articles([article], self.db_path)
+        first = summarize_article(article)
+        self.assertEqual(first.status, "insufficient_content")
+        self.assertTrue(save_summary_result(1, first, self.db_path)["saved"])
+        duplicate = save_summary_result(1, first, self.db_path)
+        self.assertEqual(duplicate["reason"], "duplicate_insufficient_content")
+        with connect(self.db_path) as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM article_summaries").fetchone()[0], 1)
+
+        changed = summarize_article({**article, "summary": article["summary"] + " Different source revision."})
+        self.assertNotEqual(first.source_text_fingerprint, changed.source_text_fingerprint)
+        self.assertTrue(save_summary_result(1, changed, self.db_path)["saved"])
+        with connect(self.db_path) as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM article_summaries").fetchone()[0], 2)
+
 
 if __name__ == "__main__":
     unittest.main()

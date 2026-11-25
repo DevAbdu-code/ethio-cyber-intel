@@ -6,6 +6,7 @@ import logging
 import math
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 import pandas as pd
 import plotly.express as px
@@ -30,7 +31,8 @@ from ethio_cyber_intel.language_detection import MIN_CONFIDENCE  # noqa: E402
 from ethio_cyber_intel.rss_collector import collect_all  # noqa: E402
 from ethio_cyber_intel.rss_sources import load_sources  # noqa: E402
 from ethio_cyber_intel.summarization import (  # noqa: E402
-    SUPPORTED_SUMMARY_LANGUAGES, summarize_article,
+    SUPPORTED_SUMMARY_LANGUAGES, SUMMARY_METHOD_VERSION,
+    is_missing_summary_text, source_fingerprint, summarize_article,
 )
 from ethio_cyber_intel.url_safety import is_public_web_url  # noqa: E402
 
@@ -144,7 +146,10 @@ def _attach_summary_statuses(articles: pd.DataFrame, summaries: pd.DataFrame) ->
         idx = row_by_id.get(int(row["article_id"]))
         if idx is None:
             continue
-        result.at[idx, "summary_status"] = row["summary_status"]
+        status = row["summary_status"]
+        if status in {"original_extractive", "human_reviewed"} and is_missing_summary_text(row.get("summary_text")):
+            status = "generation_failed"
+        result.at[idx, "summary_status"] = status
         result.at[idx, "summary_method"] = row["summary_method"]
         result.at[idx, "summary_language"] = row["summary_language"]
     return result
@@ -257,7 +262,7 @@ def _render_correlations(correlations: pd.DataFrame, db_path: Path) -> None:
 
 
 def _render_summary_workspace(articles: pd.DataFrame, labels: pd.DataFrame, db_path: Path) -> None:
-    st.subheader("Evidence-grounded article summary")
+    st.subheader("Evidence-Grounded Article Summary")
     if articles.empty:
         st.info("No stored articles are available to summarize.")
         return
@@ -265,84 +270,373 @@ def _render_summary_workspace(articles: pd.DataFrame, labels: pd.DataFrame, db_p
     selected_id = st.selectbox(
         "Article", article_ids,
         format_func=lambda article_id: (
-            f"{article_id} · {articles.loc[articles['id'] == article_id, 'title'].iloc[0]} "
+            f"{article_id} · {_summary_ui_text(articles.loc[articles['id'] == article_id, 'title'].iloc[0])} "
             f"[{('DEMO DATA' if int(articles.loc[articles['id'] == article_id, 'is_demo'].iloc[0]) else 'LIVE')}]"
         ),
         key="summary_article_id",
     )
     selected_row = articles.loc[articles["id"] == selected_id].iloc[0]
-    article_language = selected_row["language"]
+    article_title = _summary_ui_text(selected_row.get("title"))
+    article_language_value = selected_row.get("language")
+    article_language = "und" if is_missing_summary_text(article_language_value) else str(article_language_value).strip()
     default_lang = article_language if article_language in SUPPORTED_SUMMARY_LANGUAGES else "en"
-    language = st.selectbox(
-        "Requested summary language", SUPPORTED_SUMMARY_LANGUAGES,
+    requested_language = st.selectbox(
+        "Requested output language", SUPPORTED_SUMMARY_LANGUAGES,
         index=SUPPORTED_SUMMARY_LANGUAGES.index(default_lang),
         format_func=lambda code: LANGUAGE_NAMES.get(code, code), key="summary_language",
     )
-    st.caption("Original-language extractive summaries retain source sentences. Cross-language translation is not available in this baseline.")
+    history = load_summary_history(int(selected_id), db_path)
+    history_rows = [row for _, row in history.iterrows()]
+    valid_rows = [row for row in history_rows if _summary_row_has_text(row)]
+    cross_language = (
+        article_language in SUPPORTED_SUMMARY_LANGUAGES
+        and requested_language != article_language
+    )
+    requested_human_rows = [
+        row for row in valid_rows
+        if _summary_ui_text(row.get("summary_language"), "und") == requested_language
+        and _summary_ui_text(row.get("summary_status")) == "human_reviewed"
+    ]
+    source_human_rows = [
+        row for row in valid_rows
+        if _summary_ui_text(row.get("summary_language"), "und") == article_language
+        and _summary_ui_text(row.get("summary_status")) == "human_reviewed"
+    ]
+    current_source_rows = [
+        row for row in valid_rows
+        if _summary_ui_text(row.get("summary_language"), "und") == article_language
+        and _summary_ui_text(row.get("summary_status")) == "original_extractive"
+        and _summary_ui_text(row.get("method_version")) == SUMMARY_METHOD_VERSION
+    ]
+    source_rows = source_human_rows or current_source_rows
+    selected_summary = (
+        requested_human_rows[0] if cross_language and requested_human_rows else
+        source_rows[0] if source_rows else None
+    )
+    has_source_human_review = any(
+        _summary_ui_text(row.get("summary_language"), "und") == article_language
+        and _summary_ui_text(row.get("summary_status")) == "human_reviewed"
+        for row in history_rows
+    )
+    current_version_available = any(
+        _summary_ui_text(row.get("summary_language"), "und") == article_language
+        and _summary_ui_text(row.get("summary_status")) == "original_extractive"
+        and _summary_ui_text(row.get("method_version")) == SUMMARY_METHOD_VERSION
+        for row in valid_rows
+    )
+    earlier_automated_summary_exists = any(
+        _summary_ui_text(row.get("summary_language"), "und") == article_language
+        and _summary_ui_text(row.get("summary_status")) == "original_extractive"
+        and _summary_ui_text(row.get("method_version")) != SUMMARY_METHOD_VERSION
+        for row in valid_rows
+    )
+
+    transient = st.session_state.get("summary_generation_message")
+    transient_state = None
+    if transient and transient[0] == int(selected_id) and transient[1] == requested_language:
+        transient_state = transient[2]
+
+    if article_language in SUPPORTED_SUMMARY_LANGUAGES and not has_source_human_review and not current_version_available:
+        if cross_language:
+            button_label = (
+                f"Generate updated original-language summary ({LANGUAGE_NAMES[article_language]})"
+                if selected_summary or earlier_automated_summary_exists
+                else f"Generate original-language summary ({LANGUAGE_NAMES[article_language]})"
+            )
+        else:
+            button_label = (
+                "Generate updated extractive summary"
+                if selected_summary or earlier_automated_summary_exists
+                else "Generate extractive summary"
+            )
+    else:
+        button_label = None
+
+    if button_label and st.button(button_label, key="generate_summary"):
+        try:
+            detail = load_article_detail(int(selected_id), db_path)
+            if detail is None:
+                raise ValueError("The selected source article could not be loaded.")
+            article_label_rows = labels.loc[labels["article_id"] == selected_id] if not labels.empty else pd.DataFrame()
+            detail["threat_categories"] = article_label_rows["category"].tolist() if not article_label_rows.empty else []
+            detail["threat_category_status"] = (
+                article_label_rows.iloc[0]["status"] if not article_label_rows.empty else "unclassified"
+            )
+            result, generation_error = _generate_summary_result(detail, article_language)
+            if generation_error is not None:
+                transient_state = "generation_failed"
+                st.session_state["summary_generation_message"] = (
+                    int(selected_id), requested_language, transient_state,
+                )
+            else:
+                saved = save_summary_result(int(selected_id), result, db_path)
+                if saved.get("saved"):
+                    st.session_state.pop("summary_generation_message", None)
+                    st.rerun()
+                elif saved.get("reason") == "human_review_preserved":
+                    transient_state = "human_review_preserved"
+                    st.session_state["summary_generation_message"] = (
+                        int(selected_id), requested_language, transient_state,
+                    )
+                elif saved.get("reason") == "empty_summary":
+                    transient_state = "generation_failed"
+                    st.session_state["summary_generation_message"] = (
+                        int(selected_id), requested_language, transient_state,
+                    )
+                else:
+                    st.session_state.pop("summary_generation_message", None)
+                    st.rerun()
+        except Exception:
+            logger.exception("Summary generation failed for article %s", selected_id)
+            transient_state = "generation_failed"
+            st.session_state["summary_generation_message"] = (
+                int(selected_id), requested_language, transient_state,
+            )
+
+    if cross_language:
+        translation_status = (
+            "Translation is not available in the current baseline. "
+            "The original-language summary can still be generated."
+        )
+    elif article_language in SUPPORTED_SUMMARY_LANGUAGES:
+        translation_status = "Not requested; this summary remains in the source language."
+    else:
+        translation_status = "Unavailable because the source language is unknown, mixed, or unsupported."
+
+    if transient_state == "generation_failed":
+        generation_status = "Summary generation failed; no new summary was saved."
+    elif transient_state == "human_review_preserved":
+        generation_status = "Existing human-reviewed summary was preserved."
+    elif selected_summary is not None:
+        generation_status = "Summary available."
+    else:
+        source_status = next((
+            _summary_ui_text(row.get("summary_status")) for row in history_rows
+            if _summary_ui_text(row.get("summary_language"), "und") == article_language
+            and _summary_ui_text(row.get("summary_status")) in {
+                "insufficient_content", "unsupported_language", "generation_failed",
+            }
+        ), None)
+        generation_status = (
+            "Insufficient source text." if source_status == "insufficient_content" else
+            "Summary generation failed." if source_status == "generation_failed" else
+            "A prior summary uses an earlier method; generate an updated summary. Earlier history is preserved."
+            if earlier_automated_summary_exists else
+            "Summary not generated."
+        )
+
+    with st.container(border=True):
+        st.markdown("**Article:** " + article_title)
+        st.markdown("**Source:** " + _summary_ui_text(selected_row.get("source")))
+        st.markdown(f"**Original language:** {LANGUAGE_NAMES.get(article_language, 'Unknown')}")
+        st.markdown(f"**Requested language:** {LANGUAGE_NAMES.get(requested_language, requested_language)}")
+        st.markdown(f"**Translation status:** {translation_status}")
+        if selected_summary is None:
+            available_label = "No summary available yet."
+        elif _summary_ui_text(selected_summary.get("summary_status")) == "human_reviewed":
+            available_label = f"Human-reviewed {LANGUAGE_NAMES.get(_summary_ui_text(selected_summary.get('summary_language')), 'source-language')} summary."
+        else:
+            method_version = _summary_ui_text(selected_summary.get("method_version"), "unknown")
+            available_label = f"{LANGUAGE_NAMES.get(_summary_ui_text(selected_summary.get('summary_language')), 'source-language')} extractive summary (method v{method_version})."
+        st.markdown(f"**Available summary:** {available_label}")
+        st.markdown(f"**Generation status:** {generation_status}")
+
     if int(selected_row["is_demo"]):
         st.warning("DEMO DATA: this source is synthetic and not a real intelligence report.")
     if selected_row.get("content_validation_status") == "legacy_unverified":
-        st.warning("Stored full text is legacy and unverified. The summary workspace will use the source title and RSS description instead.")
-    if st.button("Generate extractive summary", key="generate_summary"):
-        try:
-            detail = load_article_detail(int(selected_id), db_path)
-            article_label_rows = labels.loc[labels["article_id"] == selected_id] if not labels.empty else pd.DataFrame()
-            article_labels = article_label_rows["category"].tolist() if not article_label_rows.empty else []
-            detail["threat_categories"] = article_labels
-            detail["threat_category_status"] = article_label_rows.iloc[0]["status"] if not article_label_rows.empty else "unclassified"
-            result = summarize_article(detail, requested_language=language)
-            saved = save_summary_result(int(selected_id), result, db_path)
-            st.session_state["summary_generation_message"] = (
-                int(selected_id), language, result.status, saved
-            )
-            if saved.get("saved"):
-                st.rerun()
-        except Exception as exc:
-            logger.exception("Summary generation failed for article %s", selected_id)
-            st.error(f"Could not create summary: {exc}")
-    message = st.session_state.get("summary_generation_message")
-    if message and message[0] == int(selected_id) and message[1] == language:
-        _, _, status, saved = message
-        if saved.get("saved"):
-            st.success(f"Summary status: {status.replace('_', ' ')}")
-        elif saved.get("reason") == "duplicate_summary":
-            st.info("This source text already has a summary with the same method and version.")
-        elif saved.get("reason") == "human_review_preserved":
-            st.warning("A human-reviewed summary exists for this article and language; automatic output was not saved.")
+        st.warning("Stored full text is legacy and unverified. The workspace uses the source title and RSS description instead.")
+
+    if selected_summary is not None:
+        summary_text = selected_summary.get("summary_text")
+        source_metadata = _summary_json(selected_summary.get("source_metadata_json"), {})
+        summary_language = _summary_ui_text(selected_summary.get("summary_language"), article_language)
+        method = _summary_ui_text(selected_summary.get("summary_method"), "Extractive sentence ranking")
+        method_version = _summary_ui_text(selected_summary.get("method_version"), "unknown")
+        evidence = _summary_json(selected_summary.get("supporting_evidence_json"), [])
+
+        st.markdown("### Extractive Summary")
+        if not is_missing_summary_text(summary_text):
+            st.write(str(summary_text).strip())
         else:
-            st.info(f"Summary status: {status.replace('_', ' ')}")
-    history = load_summary_history(int(selected_id), db_path)
-    if history.empty:
-        st.info("No summary history for this article yet.")
-        return
-    for _, row in history.iterrows():
-        label = f"{row['summary_status']} · {LANGUAGE_NAMES.get(row['summary_language'], row['summary_language'])} · {row['created_at']}"
-        with st.expander(label, expanded=True):
-            st.caption(f"Summary type: {row['summary_kind']} · Method: {row['summary_method']} v{row['method_version']}")
-            if row["summary_text"]:
-                st.write(row["summary_text"])
+            st.info("No summary text is available for this record.")
+        st.markdown(f"**Method:** {method} v{method_version} · original-language sentence selection")
+
+        st.markdown("### Supporting Evidence")
+        evidence_rows = []
+        for item in evidence if isinstance(evidence, list) else []:
+            if not isinstance(item, dict) or is_missing_summary_text(item.get("excerpt")):
+                continue
+            evidence_types = item.get("evidence_types") or _fallback_evidence_types(str(item["excerpt"]))
+            if isinstance(evidence_types, str):
+                evidence_types = [evidence_types]
+            evidence_rows.append({
+                "Original sentence": str(item["excerpt"]),
+                "Evidence type": ", ".join(str(value) for value in evidence_types) or "Selected source sentence",
+                "Source article": _summary_ui_text(item.get("source_title"), article_title),
+                "Source": _summary_ui_text(item.get("source_name"), _summary_ui_text(selected_row.get("source"))),
+                "Original language": LANGUAGE_NAMES.get(
+                    _summary_ui_text(item.get("source_language"), article_language), article_language
+                ),
+            })
+        if evidence_rows:
+            st.table(pd.DataFrame(evidence_rows))
+        else:
+            st.info("No supporting sentence excerpts were recorded for this summary.")
+
+        st.markdown("### Key Intelligence")
+        key_info = _summary_json(selected_summary.get("key_intelligence_json"), {})
+        key_rows = _key_intelligence_rows(key_info, selected_row)
+        if key_rows:
+            st.table(pd.DataFrame(key_rows, columns=["Field", "Extracted information", "Provenance"]))
+        else:
+            st.info("Key intelligence is unavailable until a summary record is generated.")
+
+        with st.expander("Source and evidence provenance"):
+            st.markdown(f"**Original URL:** {_summary_ui_text(source_metadata.get('original_url'), _summary_ui_text(selected_row.get('url')))}")
+            st.markdown(f"**Source text used:** {_summary_ui_text(source_metadata.get('text_used'), 'recorded source text')}")
+            source_text_used = selected_summary.get("source_text_used")
+            if is_missing_summary_text(source_text_used):
+                st.caption("Source text snapshot unavailable.")
             else:
-                st.info("No summary text was produced for this status.")
-            import json
-            source_metadata = json.loads(row["source_metadata_json"] or "{}")
-            source_language = source_metadata.get("source_language", "und")
-            if row["summary_kind"] == "original_language_extractive":
-                st.caption(f"Original-language extractive summary ({LANGUAGE_NAMES.get(source_language, source_language)}); this is not a translation.")
-            elif row["summary_kind"] == "translation_unavailable":
-                st.caption(f"Requested {LANGUAGE_NAMES.get(row['summary_language'], row['summary_language'])}; translation unavailable from {LANGUAGE_NAMES.get(source_language, source_language)}.")
-            st.markdown("**Key intelligence (reported evidence)**")
-            key_info = json.loads(row["key_intelligence_json"] or "{}")
-            st.json(key_info)
-            st.markdown("**Supporting source excerpts**")
-            excerpts = json.loads(row["supporting_evidence_json"] or "[]")
-            if excerpts:
-                st.json(excerpts)
-            else:
-                st.info("No summary excerpts were selected.")
-            st.markdown("**Original source metadata**")
-            st.json(source_metadata)
-            with st.expander("Exact source text used"):
-                st.text(row["source_text_used"])
+                st.text(str(source_text_used))
+            fingerprints = [item.get("source_text_fingerprint") for item in evidence
+                            if isinstance(item, dict) and item.get("source_text_fingerprint")]
+            if fingerprints:
+                st.markdown("**Internal source-text fingerprints**")
+                for fingerprint in dict.fromkeys(fingerprints):
+                    st.code(fingerprint)
+
+    if history_rows:
+        with st.expander(f"Summary history ({len(history_rows)} records)"):
+            for position, row in enumerate(history_rows, start=1):
+                row_status = _summary_ui_text(row.get("summary_status"), "unknown")
+                row_language = _summary_ui_text(row.get("summary_language"), "und")
+                row_text = row.get("summary_text")
+                row_method = _summary_ui_text(row.get("summary_method"), "Method unavailable")
+                row_version = _summary_ui_text(row.get("method_version"), "unknown")
+                created_at = _summary_ui_text(row.get("created_at"), "time unavailable")
+                st.markdown(f"**Record {position}:** {LANGUAGE_NAMES.get(row_language, row_language)} · {row_status} · {created_at}")
+                st.caption(f"{row_method} v{row_version}")
+                if not is_missing_summary_text(row_text):
+                    st.text(str(row_text).strip())
+                else:
+                    st.caption(_summary_empty_explanation(row_status))
+                if position < len(history_rows):
+                    st.divider()
+
+
+def _summary_ui_text(value, fallback: str = "Not available") -> str:
+    return fallback if is_missing_summary_text(value) else str(value).strip()
+
+
+def _summary_row_has_text(row) -> bool:
+    return (
+        _summary_ui_text(row.get("summary_status")) in {"original_extractive", "human_reviewed"}
+        and not is_missing_summary_text(row.get("summary_text"))
+    )
+
+
+def _fallback_evidence_types(sentence: str) -> list[str]:
+    from ethio_cyber_intel.summarization import _sentence_evidence_types
+
+    return _sentence_evidence_types(sentence)
+
+
+def _key_intelligence_rows(key_info: dict, article_row) -> list[dict[str, str]]:
+    if not isinstance(key_info, dict):
+        return []
+    fields = (
+        ("threat_categories", "Threat category"),
+        ("cve_identifiers", "CVE identifiers"),
+        ("affected_products", "Affected products"),
+        ("malware_names", "Malware names"),
+        ("reported_impact", "Reported impact"),
+        ("exploitation_claims", "Exploitation claims"),
+    )
+    rows = []
+    for key, label in fields:
+        item = key_info.get(key, {})
+        value = item.get("value", "Not reported") if isinstance(item, dict) else item
+        provenance = item.get("provenance", "Source text extraction") if isinstance(item, dict) else "Source text extraction"
+        if isinstance(value, (list, tuple, set)):
+            if key == "threat_categories":
+                value = [THREAT_NAMES.get(str(part), str(part)) for part in value]
+            display = "; ".join(str(part) for part in value if not is_missing_summary_text(part)) or "Not reported"
+        else:
+            display = _summary_ui_text(value, "Not reported")
+        rows.append({"Field": label, "Extracted information": display, "Provenance": _summary_ui_text(provenance)})
+
+    source = key_info.get("source") or _summary_ui_text(article_row.get("source"), "Unknown")
+    published = key_info.get("publication_date")
+    published = _format_publication_date(published)
+    rows.extend([
+        {"Field": "Source", "Extracted information": _summary_ui_text(source, "Unknown"), "Provenance": "Publisher metadata"},
+        {"Field": "Publication date", "Extracted information": published, "Provenance": "Publisher metadata; unknown when not supplied"},
+    ])
+    return rows
+
+
+def _format_publication_date(value) -> str:
+    if is_missing_summary_text(value):
+        return "Unknown"
+    parsed = pd.to_datetime(value, errors="coerce", utc=True)
+    if pd.isna(parsed):
+        return str(value)
+    return parsed.strftime("%B %d, %Y")
+
+
+def _generate_summary_result(article: dict, source_language: str):
+    """Return a summary or its exception so the workspace can show a safe status."""
+    try:
+        return summarize_article(article, requested_language=source_language), None
+    except Exception as exc:
+        logger.exception("Extractive summary generation raised an error")
+        return None, exc
+
+
+def _summary_status_label(status: str) -> str:
+    return {
+        "original_extractive": "Summary available",
+        "human_reviewed": "Summary available",
+        "insufficient_content": "Insufficient source text",
+        "unsupported_translation": "Unsupported translation",
+        "unsupported_language": "Summary not generated",
+        "generation_failed": "Summary generation failed",
+    }.get(status, "Summary not generated")
+
+
+def _summary_empty_explanation(status: str) -> str:
+    if status == "insufficient_content":
+        return "Insufficient source text: the article did not contain enough separable sentence evidence. No summary was fabricated."
+    if status == "unsupported_translation":
+        return "Unsupported translation: no translated summary was generated. Use the original-language option when available."
+    if status == "unsupported_language":
+        return "Summary not generated because the source language is unknown, mixed, or unsupported by this baseline."
+    if status == "generation_failed":
+        return "Summary generation failed. No summary text was saved."
+    return "Summary not generated. No valid summary text is available for this record."
+
+
+def _summary_json(value, fallback):
+    import json
+
+    if is_missing_summary_text(value):
+        return fallback
+    try:
+        parsed = json.loads(str(value))
+    except (TypeError, ValueError):
+        return fallback
+
+    def clean(item):
+        if isinstance(item, dict):
+            return {str(key): clean(part) for key, part in item.items()}
+        if isinstance(item, list):
+            return [clean(part) for part in item]
+        if is_missing_summary_text(item):
+            return None
+        return item
+
+    return clean(parsed)
 def _refresh(db_path: Path) -> None:
     sources = load_sources(enabled_only=True)
     if not sources:
@@ -712,6 +1006,9 @@ def main() -> None:
             "severity_method": "Severity method", "evidence_completeness": "Evidence completeness",
             "summary_status": "Summary status",
         })
+        live_display["Description"] = live_display["Description"].map(
+            lambda value: _summary_ui_text(value, "Not provided")
+        )
         st.dataframe(live_display[["Title", "Source", "Published", "Collected at", "Language", "Confidence", "Detection method", "Article text status", "Threat categories", "Category confidence (heuristic)", "Supporting evidence", "Classification method", "Classification status", "Severity", "Severity assessment status", "Severity explanation", "Severity supporting evidence", "Severity method", "Evidence completeness", "Summary status", "Report status", "Description", "Original URL"]], use_container_width=True, hide_index=True)
 
     demo = filtered[filtered["is_demo"] == 1] if not filtered.empty else filtered

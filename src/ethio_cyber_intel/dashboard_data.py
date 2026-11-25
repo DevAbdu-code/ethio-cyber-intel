@@ -56,15 +56,25 @@ def load_current_severity_assessments(db_path=None) -> pd.DataFrame:
 
 
 def load_current_summaries(db_path=None) -> pd.DataFrame:
-    """Load the latest summary state for each report, including non-output states."""
+    """Prefer an available summary; otherwise show the latest unavailable state."""
     with connect(db_path) as connection:
         return pd.read_sql_query(
-            """WITH latest AS (
-                   SELECT article_id, MAX(id) AS summary_id
-                   FROM article_summaries GROUP BY article_id
+            """WITH ranked AS (
+                   SELECT article_id,id AS summary_id,
+                          ROW_NUMBER() OVER (
+                              PARTITION BY article_id
+                              ORDER BY CASE WHEN summary_status IN ('original_extractive','human_reviewed')
+                                                 AND summary_text IS NOT NULL
+                                                 AND LENGTH(TRIM(summary_text)) > 0
+                                                 AND LOWER(TRIM(summary_text)) NOT IN ('nan','none','<na>','nat')
+                                            THEN 0 ELSE 1 END, id DESC
+                          ) AS rank
+                   FROM article_summaries
                )
-               SELECT s.article_id,s.summary_status,s.summary_language,s.summary_method,s.method_version,s.created_at
-               FROM latest x JOIN article_summaries s ON s.id=x.summary_id
+               SELECT s.article_id,s.summary_status,s.summary_language,s.summary_method,s.method_version,
+                      s.summary_text,s.created_at
+               FROM ranked x JOIN article_summaries s ON s.id=x.summary_id
+               WHERE x.rank=1
                ORDER BY s.article_id""",
             connection,
         )

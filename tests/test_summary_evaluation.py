@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from scripts.evaluate_summaries import RATING_FIELDS, evaluate
-from src.ethio_cyber_intel.summarization import summarize_article
+from src.ethio_cyber_intel.summarization import SUMMARY_METHOD_VERSION, summarize_article
 
 
 def test_empty_summary_evaluation_has_unavailable_metrics(tmp_path: Path):
@@ -31,7 +31,7 @@ def test_evaluator_requires_human_review_and_exact_method_output(tmp_path: Path)
         "article": article, "manually_reviewed": True,
         "synthetic": True,
         "source_note": "Synthetic unit-test example, not research data",
-        "review": {"method_version": "1.0", "summary_text": summary.summary_text,
+        "review": {"method_version": SUMMARY_METHOD_VERSION, "summary_text": summary.summary_text,
                    "ratings": {field: 4 for field in RATING_FIELDS},
                    "claim_count": 2, "unsupported_claim_count": 0},
     }

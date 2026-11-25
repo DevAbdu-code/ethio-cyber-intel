@@ -93,6 +93,7 @@ def normalize_entry(
         try:
             content = extractor.extract(
                 link, allowed_hostname=source.hostname, expected_title=title,
+                expected_description=description,
                 delay_seconds=source.delay_seconds,
             ) or ""
             if not content:

@@ -107,6 +107,34 @@ def test_extractor_uses_article_body_not_first_recommendation_card():
     assert article["language"] == "en"
 
 
+def test_extractor_rejects_long_ad_candidate_and_selects_description_matching_article_body():
+    ad = "A promotional security service offers email scanning and a read-only trial. " * 8
+    html = f"""<!doctype html><html><head>
+      <link rel="canonical" href="{ARTICLE_URL}">
+      <meta property="og:title" content="{EXPECTED_TITLE}">
+      </head><body><h1>{EXPECTED_TITLE}</h1>
+      <div class="article-body">{ad}</div>
+      <div id="articleBody">{ARTICLE_BODY}</div>
+      </body></html>""".encode()
+    session = Mock()
+    session.get.side_effect = [
+        response(200, text="User-agent: *\nAllow: /"),
+        response(200, content=html, headers={"Content-Type": "text/html; charset=utf-8"}),
+    ]
+    extractor = ArticleExtractor(session=session)
+    description = "The report describes a .NET behavior affecting Windows code integrity protections."
+
+    article = normalize_entry({
+        "title": EXPECTED_TITLE,
+        "summary": description,
+        "link": ARTICLE_URL,
+    }, source(), extractor=extractor)
+
+    assert article["content_validation_status"] == "page_identity_verified"
+    assert article["content"].startswith("Google Project Zero researcher")
+    assert "promotional security service" not in article["content"]
+
+
 def test_extraction_rejects_mismatched_page_headline():
     html = f"""<html><head><title>Unrelated Identity Exposure Report</title></head>
       <body><h1>Unrelated Identity Exposure Report</h1><main>{ARTICLE_BODY}</main></body></html>""".encode()

@@ -52,6 +52,15 @@ def _title_matches(expected: str, observed: str) -> bool:
     return len(overlap) >= 2 and max(coverage, sequence_ratio) >= 0.60
 
 
+def _token_overlap(reference: str, candidate: str) -> float:
+    """Measure whether a candidate body contains terms from known article text."""
+    reference_tokens = set(_TITLE_WORD_RE.findall(unicodedata.normalize("NFKC", reference).casefold()))
+    candidate_tokens = set(_TITLE_WORD_RE.findall(unicodedata.normalize("NFKC", candidate).casefold()))
+    if not reference_tokens:
+        return 0.0
+    return len(reference_tokens & candidate_tokens) / len(reference_tokens)
+
+
 class ArticleExtractor:
     """Fetch only same-publisher public pages that robots.txt permits."""
 
@@ -94,7 +103,7 @@ class ArticleExtractor:
 
     def extract(
         self, url: str, *, allowed_hostname: str, expected_title: str | None = None,
-        delay_seconds: float = 0.5,
+        expected_description: str | None = None, delay_seconds: float = 0.5,
     ) -> str | None:
         """Return article text only when URL, page headline, and body agree.
 
@@ -157,8 +166,8 @@ class ArticleExtractor:
         # evidence that it contains the requested report.
         candidates = []
         for selector in (
-            '[itemprop="articleBody"]', "#articlebody", "#article-body",
-            ".article-body", ".article-content", ".post-body", ".entry-content",
+            '[itemprop="articleBody"]', "#articleBody", "#articlebody", "#article-body",
+            ".article-body", ".articleBody", ".article-content", ".post-body", ".entry-content",
             ".story-body",
         ):
             candidates.extend(soup.select(selector))
@@ -168,9 +177,27 @@ class ArticleExtractor:
                 if _title_matches(expected_title, node.get_text(" ", strip=True))
             )
 
+        matched_candidates = []
+        expected_description = clean_html(expected_description)
         for candidate in candidates:
             text = " ".join(candidate.get_text(" ", strip=True).split())
-            if len(text) >= MIN_ARTICLE_TEXT_LENGTH:
-                return text
+            if len(text) < MIN_ARTICLE_TEXT_LENGTH:
+                continue
+            description_overlap = _token_overlap(expected_description, text) if expected_description else 0.0
+            title_overlap = _token_overlap(expected_title, text)
+            # A headline match on the page is not enough: recommendation cards
+            # and ads can sit beside a valid headline. Prefer a body that also
+            # corroborates the RSS lead/title, and reject low-overlap candidates.
+            if expected_description:
+                if description_overlap < 0.35 and title_overlap < 0.40:
+                    continue
+            elif title_overlap < 0.25:
+                continue
+            matched_candidates.append((description_overlap * 3.0 + title_overlap, len(text), text))
+        if matched_candidates:
+            # Prefer the strongest text match; ties prefer the more focused
+            # container over a parent that may include unrelated page modules.
+            matched_candidates.sort(key=lambda item: (-item[0], item[1]))
+            return matched_candidates[0][2]
         logger.info("No sufficiently substantial article body matched %s", url)
         return None
