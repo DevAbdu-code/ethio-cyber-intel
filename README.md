@@ -6,6 +6,15 @@ ETHIO-CYBER INTEL is a CPU-friendly research prototype that collects permitted p
 
 > **Research and trust boundary:** LIVE means collected from a source; it does not mean independently verified. Automated labels and relationship candidates are preliminary. Rule scores are heuristic, not calibrated probabilities. Human review is required before treating results as validated intelligence. The current release is a prototype, not a production-ready service.
 
+## 🎥 Project Walkthrough & Live Demo
+
+Watch our system walkthroughs demonstrating live RSS threat ingestion, trilingual detection (English, Amharic, Afaan Oromo), cross-language correlation with explainable CVE matching, and evidence-grounded summaries:
+
+### Team Members & Individual Demo Videos (INSA Weekend Cybersecurity Program)
+- **[Abdurahman Habib — Watch Walkthrough Video](https://drive.google.com/file/d/17miKXEMzcX3u9njQLS4ZPjAICL8X5VTZ/view?usp=drive_link)**
+- **[Yishak Addisu — Watch Walkthrough Video](https://drive.google.com/file/d/1g29LX_GpaHyCnv0HO-Z8HUZsS9Xcy5ir/view?usp=drive_link)**
+- **Firaol Fetene** 
+
 ## Research motivation and contribution
 
 Security reporting is spread across sources and languages, while local-language NLP resources and representative evaluation data are limited. The project provides a modular, auditable workflow that keeps uncertainty and provenance visible instead of silently converting missing evidence into claims. It is an integration and research-evaluation artifact; it does **not** establish superior analytic performance or trilingual parity. See the [final research paper](docs/final_research_paper.md), the [Stage 9 evaluation report](docs/stage9_research_evaluation_report.md), and the [Stage 10 system validation report](docs/system_validation_report.md). The earlier [research evaluation report](docs/research_evaluation_report.md) is a dated Stage 8 record.
