@@ -13,7 +13,9 @@ Watch our system walkthroughs demonstrating live RSS threat ingestion, trilingua
 ### Team Members & Individual Demo Videos (INSA Weekend Cybersecurity Program)
 - **[Abdurahman Habib — Watch Walkthrough Video](https://drive.google.com/file/d/17miKXEMzcX3u9njQLS4ZPjAICL8X5VTZ/view?usp=drive_link)**
 - **[Yishak Addisu — Watch Walkthrough Video](https://drive.google.com/file/d/1g29LX_GpaHyCnv0HO-Z8HUZsS9Xcy5ir/view?usp=drive_link)**
-- **Firaol Fetene** 
+
+- **Firaol Fetene**
+- **Abdi Adugna**
 
 ## Research motivation and contribution
 
